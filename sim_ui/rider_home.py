@@ -213,7 +213,9 @@ def home():
             fare = float(request.form.get("fare", calculate_fare(strategy)))
             db.create_trip(pickup, destination, strategy, fare)
             return redirect(url_for("rider_home.trips"))
-
+        elif action == "cancel":
+            # From Trip Preview: just go back to clean Rider Home
+            return redirect(url_for("rider_home.home"))
         elif action == "request":
             # save trip to db
             fare = calculate_fare(strategy)
