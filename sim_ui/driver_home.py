@@ -1,4 +1,6 @@
+## Coded with help from chat gpt
 from flask import Blueprint, render_template_string, request
+import db
 
 driver_home = Blueprint("driver_home", __name__)
 
@@ -44,8 +46,13 @@ BASE_HTML = """
 
 
 HOME_BODY = """
+<nav>
+  <a href="{{ url_for('driver_home.home') }}"><strong>Driver Home</strong></a>
+  <a href="{{ url_for('rider_home.home') }}" class="secondary">Rider Home</a>
+</nav>
+
 <h2>Driver Homepage</h2>
-<p class="muted">Incoming ride requests. Accept or decline. (UI only — no backend logic yet.)</p>
+<p class="muted">Incoming ride requests. Accept or decline.</p>
 
 {% if banner %}
   <article class="contrast">
@@ -58,21 +65,23 @@ HOME_BODY = """
   {% for r in requests %}
   <article class="card">
     <div class="row">
-      <h3 style="margin:0">Request {{ r.id }}</h3>
+      <h3 style="margin:0">Request #{{ r.id }}</h3>
       <span class="pill">Est. Fare: ${{ '%.2f'|format(r.fare) }}</span>
     </div>
     <p style="margin:.5rem 0 0 0"><strong>Pickup:</strong> {{ r.pickup }}</p>
     <p style="margin:.25rem 0 .5rem 0"><strong>Destination:</strong> {{ r.destination }}</p>
-    <p class="muted" style="margin:0">ETA to pickup: {{ r.eta }}</p>
+    <p class="muted" style="margin:0">Created: {{ r.created_at }}</p>
 
     <form method="POST" action="{{ url_for('driver_home.home') }}" style="margin-top:.75rem">
-      <input type="hidden" name="request_id" value="{{ r.id }}">
+      <input type="hidden" name="trip_id" value="{{ r.id }}">
       <div class="actions">
         <button type="submit" name="decision" value="accept">Accept</button>
         <button type="submit" name="decision" value="decline" class="secondary">Decline</button>
       </div>
     </form>
   </article>
+  {% else %}
+  <p class="muted">No pending requests right now.</p>
   {% endfor %}
 </section>
 """
@@ -81,18 +90,31 @@ HOME_BODY = """
 def home():
     banner = None
     if request.method == "POST":
-        req_id = (request.form.get("request_id") or "").strip()
+        trip_id = request.form.get("trip_id", "").strip()
         decision = (request.form.get("decision") or "").strip()
-        if req_id and decision in {"accept", "decline"}:
-            verb = "accepted" if decision == "accept" else "declined"
+        if trip_id.isdigit() and decision in {"accept", "decline"}:
+            db.update_trip_status(int(trip_id), "accepted" if decision == "accept" else "declined")
             banner = {
-                "title": f"Request {req_id} {verb}.",
-                "detail": ""
+                "title": f"Request #{trip_id} {'accepted' if decision=='accept' else 'declined'}.",
+                "detail": "Status updated in SQLite (app.db).",
             }
     
+    rows = db.get_pending_trips()
+    requests = [
+        {
+            "id": row[0],
+            "pickup": row[1],
+            "destination": row[2],
+            "strategy": row[3],
+            "fare": row[4],
+            "created_at": row[6],
+        }
+        for row in rows
+    ]
+
     body = render_template_string(
         HOME_BODY,
-        requests=get_mock_requests(),
+        requests= requests,
         banner = banner
     )
     return render_template_string(BASE_HTML, body=body)
