@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS trips(
     strategy TEXT NOT NULL,
     fare REAL NOT NULL,
     state TEXT NOT NULL DEFAULT 'requested', -- requested | accept | declined | completed | cancelled
-    distance INTEGER NOT NULL
+    distance INTEGER NOT NULL,
+    user_id INTEGER,
+    driver_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -27,6 +29,14 @@ CREATE TABLE IF NOT EXISTS users (
     rating Text NOT NULL,
     role TEXT CHECK(role IN ('rider','driver')) DEFAULT 'rider',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS trip_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id INTEGER NOT NULL,
+    rating INTEGER CHECK(rating BETWEEN 1 AND 5),
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(trip_id) REFERENCES trips(id) ON DELETE CASCADE
 );
 """
 
@@ -58,6 +68,15 @@ def create_trip(pickup: str, destination:str, strategy: str, fare: float) -> int
             raise RuntimeError("Failed to create trip")
         return trip_id
 
+def get_trip_by_id(trip_id: int):
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT * FROM trips WHERE id = ?",
+            (trip_id,)
+        )
+        return cur.fetchone()
+
 def list_trips(limit=50):
     with connect() as con:
         cur = con.cursor()
@@ -81,7 +100,18 @@ def update_trip_status(trip_id: int, new_status:str):
         con.execute("UPDATE trips SET state = ? WHERE id = ?", (new_status, trip_id))  
 
 
-#Users Helper
+def get_driver_for_trip(trip_id: int):
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT * FROM users "
+            "JOIN trips ON users.id = trips.driver_id "
+            "WHERE trips.id = ? AND users.role = 'driver'",
+            (trip_id,)
+        )
+        return cur.fetchone()
+
+# --- Users Helper ---
 def create_user(name: str, rating: str, role: str) -> int:
     with connect() as con:
         cur = con.cursor()
@@ -102,3 +132,38 @@ def get_all_users(limit: int = 50):
             (limit,)
         )  
         return cur.fetchall()
+
+def update_user_rating(user_id: int, new_rating: str):
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE users SET rating = ? WHERE id = ?",
+            (new_rating, user_id)
+        )
+
+
+
+# --- Trip Reviews Helper ---
+def get_review_by_trip_id(trip_id: int):
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT * FROM trip_reviews WHERE trip_id = ?",
+            (trip_id,)
+        )
+        return cur.fetchone()
+    
+def create_update_review(trip_id: int, rating: int):
+    with connect() as con:
+        cur = con.cursor()
+        existing_review = get_review_by_trip_id(trip_id)
+        if existing_review:
+            cur.execute(
+                "UPDATE trip_reviews SET rating = ? WHERE trip_id = ?",
+                (rating, trip_id)
+            )
+        else:
+            cur.execute(
+                "INSERT INTO trip_reviews (trip_id, rating) VALUES (?, ?)",
+                (trip_id, rating)
+            )

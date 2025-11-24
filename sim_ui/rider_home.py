@@ -21,6 +21,10 @@ def estimate_eta(pickup: str, destination: str) -> int:
     # Stub function: In real app, calculate based on addresses
     return 10
 
+def get_driver_for_trip(tripId:int):
+    return db.get_driver_for_trip(tripId)
+
+
 BASE_HTML = """ 
 <!doctype html>
 <html lang="en">
@@ -81,7 +85,7 @@ HOME_BODY = """
     <div class="actions">
       <button type="submit" name="action" value="preview" class="contrast">Preview Route &amp; Fare</button>
       <button type="submit" name="action" value="request">Request Trip</button>
-      <a role="button" href="{{ url_for('rider_home.trips') }}" class="secondary">View Past Trips</a>
+      <a role="button" href="{{ url_for('rider_home.past_trips') }}" class="secondary">View Past Trips</a>
     </div>
   </form>
 </section>
@@ -171,11 +175,200 @@ TRIPS_BODY = """
         <td>{{ t[4] }}</td>
         <td>{{ '%.2f'|format(t[5]) }}</td>
         <td>{{ t[6] }}</td>
+        <td>
+          <a href="{{ url_for('rider_home.trip_summary', trip_id=t[0]) }}">View Summary</a>
+        </td>
       </tr>
     {% endfor %}
   </tbody>
 </table>
 """
+
+TRIP_SUMMARY_BODY = """
+<nav>
+  <a href="{{ url_for('rider_home.trips') }}" class="secondary">Back to Past Trips</a>
+  <a href="{{ url_for('driver_home.home') }}" class="secondary">Driver Home</a>
+</nav>
+
+<h2>Trip Summary</h2>
+{% if trip is none %}
+  <p class="muted">Trip not found.</p>
+{% else %}
+  <section class="card">
+    <header style="display:flex;align-items:center;justify-content:space-between;">
+      <div>
+        <strong>{{ trip.pickup }}</strong><br>
+        <span style="font-size:.9rem;">to</span><br>
+        <strong>{{ trip.destination }}</strong>
+      </div>
+      <span class="pill">{{ trip.strategy }}</span>
+    </header>
+
+    <hr>
+
+    <p style="margin:.25rem 0;"><strong>Trip ID:</strong> {{ trip.id }}</p>
+    <p style="margin:.25rem 0;"><strong>Completed At:</strong> {{ trip.created_at }}</p>
+    <p style="margin:.25rem 0;"><strong>Status:</strong> {{ trip.status }}</p>
+    <p style="margin:.25rem 0;"><strong>Fare:</strong> ${{ "%.2f"|format(trip.fare) }}</p>
+  </section>
+
+  <section class="card" style="margin-top:1rem;">
+    <h3 style="margin-top:0;">Leave a Review</h3>
+    <form method="POST" action="{{ url_for('rider_home.trip_summary', trip_id=trip.id) }}">
+      <label>
+        Rating (1–5)
+        <select name="rating" required>
+          {% for r in [1,2,3,4,5] %}
+            <option value="{{ r }}" {% if review and review.rating == r %}selected{% endif %}>{{ r }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        Comment (optional)
+        <textarea name="comment" rows="3" placeholder="How was your trip?">{{ review.comment if review else "" }}</textarea>
+      </label>
+
+      <div class="actions">
+        <button type="submit" name="action" value="submit-rating">Submit Rating</button>
+        <a role="button" class="secondary" href="{{ url_for('rider_home.trip_receipt', trip_id=trip.id) }}">
+          View Receipt
+        </a>
+      </div>
+    </form>
+
+    {% if review %}
+      <p class="muted" style="margin-top:.5rem;">
+        Last submitted rating: {{ review.rating }} ★ on {{ review.created_at }}
+      </p>
+    {% endif %}
+  </section>
+{% endif %}
+"""
+
+TRIP_RECEIPT_BODY = """
+<nav>
+  <a href="{{ url_for('rider_home.trip_summary', trip_id=trip.id) }}" class="secondary">Back to Trip Summary</a>
+  <a href="{{ url_for('rider_home.trips') }}" class="secondary">Past Trips</a>
+</nav>
+
+<h2>Trip Receipt</h2>
+
+{% if trip is none %}
+  <p class="muted">Trip not found.</p>
+{% else %}
+  <section class="card">
+    <p><strong>Trip ID:</strong> {{ trip.id }}</p>
+    <p><strong>Date:</strong> {{ trip.created_at }}</p>
+    <p><strong>Pickup:</strong> {{ trip.pickup }}</p>
+    <p><strong>Destination:</strong> {{ trip.destination }}</p>
+    <p><strong>Fare Strategy:</strong> {{ trip.strategy }}</p>
+
+    <hr>
+
+    <!-- Simple static breakdown; you can refine this later -->
+    <p><strong>Base Fare:</strong> ${{ "%.2f"|format(trip.fare * 0.7) }}</p>
+    <p><strong>Taxes & Fees:</strong> ${{ "%.2f"|format(trip.fare * 0.3) }}</p>
+    <p><strong>Total Charged:</strong> ${{ "%.2f"|format(trip.fare) }}</p>
+  </section>
+{% endif %}
+"""
+
+NO_DRIVERS_BODY = """
+<nav>
+  <a href="{{ url_for('rider_home.home') }}" class="secondary">Back to Rider Home</a>
+  <a href="{{ url_for('driver_home.home') }}" class="secondary">Driver Home</a>
+</nav>
+
+<h2>No Drivers Available</h2>
+
+<section class="card" style="margin-top:0.75rem;">
+  <p style="font-size:1rem; margin-bottom:0.5rem;">
+    We couldn&#39;t find any available drivers near your pickup location right now.
+  </p>
+ 
+
+  <form method="POST" action="{{ url_for('rider_home.no_drivers') }}" style="margin-top:1rem;">
+    <!-- optional hidden fields if you want to carry the last pickup/destination -->
+    <input type="hidden" name="pickup" value="{{ pickup or '' }}">
+    <input type="hidden" name="destination" value="{{ destination or '' }}">
+
+    <div class="actions">
+      <button type="submit" name="action" value="try-again">Try Again</button>
+      <button type="submit" name="action" value="change-pickup" class="secondary">Change Pickup</button>
+    </div>
+  </form>
+</section>
+"""
+
+LIVE_TRIP_BODY = """
+<nav>
+  <a href="{{ url_for('rider_home.trips') }}" class="secondary">Past Trips</a>
+  <a href="{{ url_for('rider_home.home') }}" class="secondary">Rider Home</a>
+</nav>
+
+<h2>Live Trip</h2>
+
+{% if trip is none %}
+  <p class="muted">Trip not found.</p>
+{% else %}
+  {% if banner %}
+    <article class="contrast">
+      <strong>{{ banner.title }}</strong>
+      <p class="muted">{{ banner.detail }}</p>
+    </article>
+  {% endif %}
+
+  <section class="card">
+    <header style="display:flex;align-items:center;justify-content:space-between;">
+      <div>
+        <strong>{{ trip.pickup }}</strong><br>
+        <span style="font-size:.9rem;">to</span><br>
+        <strong>{{ trip.destination }}</strong>
+      </div>
+      <span class="pill">{{ trip.status_label }}</span>
+    </header>
+
+    <hr>
+
+    <h3 style="margin-top:0;">Driver &amp; Car</h3>
+    <p style="margin:.25rem 0;"><strong>Driver:</strong> {{ driver.name }}</p>
+    <p style="margin:.25rem 0;">
+      <strong>Rating:</strong> {{ "%.1f"|format(driver.rating) }} ★
+    </p>
+    <p style="margin:.25rem 0;">
+      <strong>Vehicle:</strong> {{ driver.vehicle_color }} {{ driver.vehicle_model }}
+      ({{ driver.vehicle_plate }})
+    </p>
+    <p class="muted" style="margin-top:.25rem;">
+      ETA: ~{{ driver.eta_min }} minutes · Trip ID: {{ trip.id }} · Fare: ${{ "%.2f"|format(trip.fare) }}
+    </p>
+  </section>
+
+  <section class="card" style="margin-top:1rem;">
+    <h3 style="margin-top:0;">Live Map</h3>
+    <div class="map">{{ fmap|safe }}</div>
+    <p class="muted" style="margin-top:.5rem;">
+      Static map preview for now. Later, update this with live driver position and route.
+    </p>
+  </section>
+
+  <form method="POST" action="{{ url_for('rider_home.live_trip', trip_id=trip.id) }}" style="margin-top:1rem;">
+    <div class="actions">
+      <button type="submit" name="action" value="contact">Contact Driver</button>
+      <button type="submit" name="action" value="cancel" class="secondary"
+              {% if trip.status in ['completed','cancelled'] %}disabled{% endif %}>
+        Cancel Trip
+      </button>
+    </div>
+    <p class="muted" style="margin-top:.5rem;">
+      Current status: {{ trip.status_label }}
+    </p>
+  </form>
+{% endif %}
+"""
+
+
 
 @rider_home.route("/", methods=["GET", "POST"])
 def home():
@@ -212,7 +405,7 @@ def home():
              # Confirm from Trip Preview page: save trip, go to Past Trips
             fare = float(request.form.get("fare", calculate_fare(strategy)))
             db.create_trip(pickup, destination, strategy, fare)
-            return redirect(url_for("rider_home.trips"))
+            return redirect(url_for("rider_home.past_trips"))
         elif action == "cancel":
             # From Trip Preview: just go back to clean Rider Home
             return redirect(url_for("rider_home.home"))
@@ -220,7 +413,7 @@ def home():
             # save trip to db
             fare = calculate_fare(strategy)
             db.create_trip(pickup, destination, strategy, fare)
-            return redirect(url_for("rider_home.trips"))
+            return redirect(url_for("rider_home.past_trips"))
     
 
     fmap_html = make_map()
@@ -241,4 +434,157 @@ def home():
 def past_trips():
     trips = db.list_trips()
     body = render_template_string(TRIPS_BODY, trips=trips)
+    return render_template_string(BASE_HTML, body=body)
+
+@rider_home.route("/trip/<int:trip_id>", methods=["GET", "POST"])
+def trip_summary(trip_id):
+    row = db.get_trip_by_id(trip_id)
+    if row is None:
+        trip = None
+        review = None
+    else:
+        trip = {
+            "id": row[0],
+            "created_at": row[1],
+            "pickup": row[2],
+            "destination": row[3],
+            "strategy": row[4],
+            "fare": row[5],
+            "state": row[6]
+        }
+        rrow = db.get_review_by_trip_id(trip_id)
+        review = None
+        if rrow:
+            review = {
+                "id": rrow[0],
+                "rating": rrow[2],
+                "created_at": rrow[3]
+            }
+    
+    if request.method == "POST" and trip is not None:
+        action = request.form.get("action")
+        if action == "submit-rating":
+            rating_raw = request.form.get("rating", "").strip()
+
+            try:
+                rating = int(rating_raw)
+            except ValueError:
+                rating = None
+            if rating and 1 <= rating <= 5:
+                db.create_update_review(trip_id, rating)
+                rrow = db.get_review_by_trip_id(trip_id)
+                review = {
+                    "id": rrow[0],
+                    "rating": rrow[2],
+                    "created_at": rrow[3]
+                }
+    
+    body = render_template_string(TRIP_SUMMARY_BODY, trip=trip, review=review)
+    return render_template_string(BASE_HTML, body=body)
+
+@rider_home.route("/trip/<int:trip_id>/receipt")
+def trip_receipt(trip_id):
+    row = db.get_trip_by_id(trip_id)
+    if row is None:
+        trip = None
+    else:
+        trip = {
+            "id": row[0],
+            "created_at": row[1],
+            "pickup": row[2],
+            "destination": row[3],
+            "strategy": row[4],
+            "fare": row[5],
+            "state": row[6]
+        }
+    
+    body = render_template_string(TRIP_RECEIPT_BODY, trip=trip)
+    return render_template_string(BASE_HTML, body=body)
+
+
+"""
+    Live Trip (Rider)
+
+    Shows driver & car details, trip status, and map.
+    Actions: "Contact Driver" and "Cancel Trip".
+"""
+@rider_home.route("/trip/<int:trip_id>/live", methods=["GET", "POST"])
+def live_trip(trip_id):
+    row = db.get_trip_by_id(trip_id)
+    banner = None
+
+    if row is None:
+        trip = None
+        driver = None
+        fmap_html = make_map()
+    else:
+        trip = {
+            "id": row[0],
+            "created_at": row[1],
+            "pickup": row[2],
+            "destination": row[3],
+            "strategy": row[4],
+            "fare": row[5],
+            "state": row[6]
+        }
+
+        # Map internal status -> nice label
+        status_map = {
+            "requested": "Requested",
+            "accepted": "Accepted",
+            "to_pickup": "To Pickup",
+            "to_destination": "To Destination",
+            "completed": "Complete",
+            "declined": "Declined",
+            "cancelled": "Cancelled",
+        }
+
+        trip["status_label"] = status_map.get(trip["state"], trip["state"].title())
+        
+        driver = get_driver_for_trip(trip_id)
+
+        if request.method == "POST":
+            action = request.form.get("action")
+
+            if action == "contact":
+                # UI-only: pretend we're opening a chat/call
+                banner = {
+                    "title": "Contacting driver…",
+                    "detail": "This is a demo. In a real app, this would open in-app chat or call.",
+                }
+            elif action == "cancel" and trip["state"] not in ["completed", "cancelled"]:
+                db.update_trip_status(trip_id, "cancelled")
+                trip["state"] = "cancelled"
+                trip["status_label"] = status_map["cancelled"]
+                banner = {
+                    "title": "Trip Cancelled",
+                    "detail": "Your trip has been cancelled.",
+                }
+        fmap_html = make_map()
+
+    body = render_template_string(
+        LIVE_TRIP_BODY,
+        trip=trip,
+        driver=driver,
+        fmap=fmap_html,
+        banner=banner
+    )
+    return render_template_string(BASE_HTML, body=body)
+
+
+
+@rider_home.route("/no_drivers", methods=["GET", "POST"])
+def no_drivers():
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "try-again":
+            return redirect(url_for("rider_home.home"))
+        elif action == "change-pickup":
+            return redirect(url_for("rider_home.home"))
+    
+    body = render_template_string(
+        NO_DRIVERS_BODY,
+        pickup=request.form.get("pickup", ""),
+        destination=request.form.get("destination", "")
+    )
     return render_template_string(BASE_HTML, body=body)
