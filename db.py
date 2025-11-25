@@ -56,12 +56,12 @@ def init_db():
         con.executescript(SCHEMA)
 
 #Trip Helpers
-def create_trip(pickup: str, destination:str, strategy: str, fare: float) -> int:
+def create_trip(pickup: str, destination: str, strategy: str, fare: float, user_id: int = None) -> int:
     with connect() as con:
         cur = con.cursor()
         cur.execute(
-            "INSERT INTO trips (pickup, destination, strategy, fare, state) VALUES (?, ?, ?, ?, 'requested')",
-            (pickup, destination, strategy, fare)
+            "INSERT INTO trips (pickup, destination, strategy, fare, state, distance, user_id) VALUES (?, ?, ?, ?, 'requested', 5, ?)",
+            (pickup, destination, strategy, fare, user_id)
         )
         trip_id = cur.lastrowid
         if trip_id is None:
@@ -124,6 +124,16 @@ def create_user(name: str, rating: str, role: str) -> int:
             raise RuntimeError("Failed to create user")
         return user_id
 
+def get_user_by_id(user_id: int):
+    """Get a user by their ID from the database"""
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id, name, rating, role, created_at FROM users WHERE id = ?",
+            (user_id,)
+        )
+        return cur.fetchone()
+
 def get_all_users(limit: int = 50):
     with connect() as con:
         cur = con.cursor()
@@ -167,3 +177,34 @@ def create_update_review(trip_id: int, rating: int):
                 "INSERT INTO trip_reviews (trip_id, rating) VALUES (?, ?)",
                 (trip_id, rating)
             )
+
+# Trip Management Integration Helpers
+def create_trip_from_object(trip_obj) -> int:
+    """Create a database trip record from a Trip object"""
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "INSERT INTO trips (pickup, destination, strategy, fare, state, distance) VALUES (?, ?, ?, ?, ?, ?)",
+            (trip_obj.pickup, trip_obj.destination, trip_obj.fare_strategy.get_strategy_name(), 
+             trip_obj.base_fare, trip_obj.state.value, int(trip_obj.distance_km))
+        )
+        trip_id = cur.lastrowid
+        if trip_id is None:
+            raise RuntimeError("Failed to create trip")
+        return trip_id
+
+def update_trip_from_object(trip_id: int, trip_obj):
+    """Update database trip record from Trip object"""
+    with connect() as con:
+        con.execute(
+            "UPDATE trips SET state = ?, fare = ?, distance = ? WHERE id = ?",
+            (trip_obj.state.value, trip_obj.base_fare, int(trip_obj.distance_km), trip_id)
+        )
+
+def get_trip_state(trip_id: int) -> str:
+    """Get the current state of a trip"""
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute("SELECT state FROM trips WHERE id = ?", (trip_id,))
+        result = cur.fetchone()
+        return result[0] if result else "unknown"

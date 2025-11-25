@@ -1,7 +1,11 @@
 ## Coded with help from chat gpt
-from flask import Blueprint, Flask, render_template_string, request, url_for, redirect
+from typing import Optional
+from flask import Blueprint, Flask, render_template_string, request, url_for, redirect, session
 import folium
 import db
+from trip_management import Trip
+from user_classes import Rider, Driver, TripState
+from fare_calc import FareStrategyFactory
 
 rider_home = Blueprint("rider_home", __name__)
 
@@ -9,17 +13,71 @@ def make_map():
     fmap = folium.Map(location=[40.758, -73.9855], zoom_start=12, tiles="OpenStreetMap")
     return fmap._repr_html_()
 
+# Keep legacy fare calculation for compatibility, but prefer Trip class methods
 fare_strategy = {"Standard": 10.00, "Surge": 16.00, "Premium": 20.00}
 def calculate_fare(strategy: str) -> float:
     return fare_strategy.get(strategy, 10.00)
 
-def estimate_distance(pickup: str, destination: str) -> int:
+def estimate_distance(pickup: str, destination: str) -> float:
     # Stub function: In real app, calculate based on addresses
-    return 5
+    # Return float for compatibility with Trip class
+    return 5.0
 
-def estimate_eta(pickup: str, destination: str) -> int:
-    # Stub function: In real app, calculate based on addresses
-    return 10
+def estimate_eta(pickup: str, destination: str) -> float:
+    # Stub function: In real app, calculate based on addresses  
+    # Return float for compatibility with Trip class
+    return 10.0
+
+def create_trip_with_objects(pickup: str, destination: str, strategy: str, rider: Optional["Rider"] = None) -> Trip:
+  """Create a Trip object with proper OOP pattern integration.
+
+  Notes:
+  - If a Rider instance is provided, it will be used.
+  - If no Rider is provided, this function will try to build one from the Flask
+    session (key: 'user_id') or fall back to a lightweight guest Rider.
+  - Avoids hard-coding a specific user id so the code is suitable for real apps.
+  """
+  # If caller didn't pass a Rider, try to resolve from session / DB, otherwise use a guest
+  if rider is None:
+    user_id = None
+    try:
+      user_id = session.get("user_id")
+    except Exception:
+      user_id = None
+
+    if user_id:
+      # Try to fetch a persistent user record if the DB helper exists.
+      try:
+        user_record = db.get_user_by_id(user_id)
+      except Exception:
+        user_record = None
+
+      if user_record:
+        # users table layout: id, name, rating, role, created_at
+        # Map database fields to Rider constructor parameters
+        db_id, db_name, db_rating, db_role, db_created_at = user_record
+        # Generate email from name (since DB doesn't have email field)
+        email = f"{db_name.lower().replace(' ', '').replace('-', '')}@example.com" if db_name else "user@example.com"
+        # Use empty phone since DB doesn't have phone field
+        phone = ""
+        
+        rider = Rider(user_id=str(db_id), name=db_name, email=email, phone=phone)
+      else:
+        # User ID exists in session but not found in DB
+        rider = Rider(user_id=str(user_id), name="Guest User", email="guest@example.com", phone="")
+    else:
+      # No user_id in session - create guest rider
+      rider = Rider(user_id="guest", name="Guest", email="guest@example.com", phone="")
+
+  # Create trip object
+  trip = Trip(pickup, destination, rider, strategy)
+
+  # Set route info and calculate fare using strategy pattern
+  distance = estimate_distance(pickup, destination)
+  duration = estimate_eta(pickup, destination)
+  trip.set_route_info(distance, duration)
+
+  return trip
 
 def get_driver_for_trip(tripId:int):
     return db.get_driver_for_trip(tripId)
@@ -86,6 +144,7 @@ HOME_BODY = """
       <button type="submit" name="action" value="preview" class="contrast">Preview Route &amp; Fare</button>
       <button type="submit" name="action" value="request">Request Trip</button>
       <a role="button" href="{{ url_for('rider_home.past_trips') }}" class="secondary">View Past Trips</a>
+      <a role="button" href="{{ url_for('rider_home.advanced_trip') }}" class="secondary">Advanced Trip Demo</a>
     </div>
   </form>
 </section>
@@ -384,9 +443,9 @@ def home():
         action = request.form.get("action")
 
         if action == "preview":
-            preview_distance = estimate_distance(pickup, destination)
-            preview_eta = estimate_eta(pickup, destination)
-            fare = calculate_fare(strategy)
+            # Create trip object for preview with proper fare calculation
+            trip_obj = create_trip_with_objects(pickup, destination, strategy)
+            
             fmap_html = make_map()
 
             body = render_template_string(
@@ -394,25 +453,26 @@ def home():
                 pickup=pickup,
                 destination=destination,
                 strategy=strategy,
-                distance_km=preview_distance,
-                eta_min=preview_eta,
-                fare=fare,
+                distance_km=trip_obj.distance_km,
+                eta_min=trip_obj.duration_min,
+                fare=trip_obj.base_fare,
                 fmap=fmap_html
             )
 
             return render_template_string(BASE_HTML, body=body)
         elif action == "confirm":
-             # Confirm from Trip Preview page: save trip, go to Past Trips
-            fare = float(request.form.get("fare", calculate_fare(strategy)))
-            db.create_trip(pickup, destination, strategy, fare)
+             # Confirm from Trip Preview page: create trip object and save to DB
+            trip_obj = create_trip_with_objects(pickup, destination, strategy)
+            # Save to database using calculated fare from strategy pattern
+            db.create_trip(pickup, destination, strategy, trip_obj.base_fare)
             return redirect(url_for("rider_home.past_trips"))
         elif action == "cancel":
             # From Trip Preview: just go back to clean Rider Home
             return redirect(url_for("rider_home.home"))
         elif action == "request":
-            # save trip to db
-            fare = calculate_fare(strategy)
-            db.create_trip(pickup, destination, strategy, fare)
+            # Create trip object and save to database with proper fare calculation
+            trip_obj = create_trip_with_objects(pickup, destination, strategy)
+            db.create_trip(pickup, destination, strategy, trip_obj.base_fare)
             return redirect(url_for("rider_home.past_trips"))
     
 
@@ -587,4 +647,149 @@ def no_drivers():
         pickup=request.form.get("pickup", ""),
         destination=request.form.get("destination", "")
     )
+    return render_template_string(BASE_HTML, body=body)
+
+@rider_home.route("/advanced-trip", methods=["GET", "POST"])
+def advanced_trip():
+    """Demonstrate advanced Trip object functionality with Observer pattern"""
+    if request.method == "POST":
+        pickup = request.form.get("pickup", "").strip()
+        destination = request.form.get("destination", "").strip()
+        strategy = request.form.get("strategy", "Standard")
+        action = request.form.get("action")
+        
+        if action == "create_advanced_trip":
+            # Create Trip object with full OOP patterns
+            trip_obj = create_trip_with_objects(pickup, destination, strategy)
+            
+            # Save to database using new helper function
+            trip_id = db.create_trip_from_object(trip_obj)
+            
+            # Create a simple observer for demonstration
+            class TripLogger:
+                def update(self, trip, old_state, new_state):
+                    print(f"Trip {trip.trip_id} changed from {old_state.value} to {new_state.value}")
+            
+            logger = TripLogger()
+            trip_obj.attach(logger)
+            
+            # Simulate trip progression
+            if strategy == "Premium":
+                # Create a mock driver and accept the trip
+                driver = Driver(user_id=2, name="John Driver", email="driver@example.com", 
+                              vehicle_info="Toyota Prius", license_plate="ABC123")
+                trip_obj.accept(driver)
+                db.update_trip_from_object(trip_id, trip_obj)
+            
+            return redirect(url_for("rider_home.trip_details", trip_id=trip_id))
+    
+    advanced_trip_body = """
+    <nav>
+        <a href="{{ url_for('rider_home.home') }}" class="secondary">Back to Rider Home</a>
+    </nav>
+    
+    <h2>Advanced Trip Management</h2>
+    <p class="muted">Demonstration of Trip object with Observer and Strategy patterns</p>
+    
+    <section class="card">
+        <h3>Create Trip with OOP Patterns</h3>
+        <form method="POST">
+            <div class="grid-2">
+                <label>
+                    Pickup Address
+                    <input type="text" name="pickup" placeholder="e.g., 350 5th Ave, New York, NY" required>
+                </label>
+                <label>
+                    Destination Address
+                    <input type="text" name="destination" placeholder="e.g., Times Square, New York, NY" required>
+                </label>
+            </div>
+            
+            <label>
+                Fare Strategy (affects calculation algorithm)
+                <select name="strategy">
+                    <option value="Standard">Standard - Basic rates</option>
+                    <option value="Surge">Surge - High demand multiplier</option>
+                    <option value="Premium">Premium - Luxury service (auto-accept demo)</option>
+                </select>
+            </label>
+            
+            <button type="submit" name="action" value="create_advanced_trip">
+                Create Trip with Advanced Features
+            </button>
+        </form>
+        
+        <p class="muted" style="margin-top:1rem;">
+            This demonstrates:<br>
+            • Strategy pattern for fare calculation<br>
+            • Observer pattern for state change notifications<br>
+            • Proper OOP encapsulation<br>
+            • Integration with database layer
+        </p>
+    </section>
+    """
+    
+    body = render_template_string(advanced_trip_body)
+    return render_template_string(BASE_HTML, body=body)
+
+@rider_home.route("/trip-details/<int:trip_id>")
+def trip_details(trip_id):
+    """Show detailed trip information with OOP integration"""
+    row = db.get_trip_by_id(trip_id)
+    if not row:
+        return "Trip not found", 404
+    
+    trip_data = {
+        "id": row[0],
+        "created_at": row[1], 
+        "pickup": row[2],
+        "destination": row[3],
+        "strategy": row[4],
+        "fare": row[5],
+        "state": row[6],
+        "distance": row[7] if len(row) > 7 else 0
+    }
+    
+    # Reconstruct Trip object for demonstration
+    rider = Rider(user_id=1, name="Default Rider", email="rider@example.com")
+    trip_obj = Trip(trip_data["pickup"], trip_data["destination"], rider, trip_data["strategy"])
+    trip_obj.set_route_info(float(trip_data["distance"]), 10.0)  # Mock duration
+    
+    trip_details_body = f"""
+    <nav>
+        <a href="{{ url_for('rider_home.home') }}" class="secondary">Back to Rider Home</a>
+        <a href="{{ url_for('rider_home.advanced_trip') }}" class="secondary">Advanced Trip</a>
+    </nav>
+    
+    <h2>Trip Details (OOP Integration)</h2>
+    
+    <section class="card">
+        <h3>Database Information</h3>
+        <p><strong>Trip ID:</strong> {trip_data['id']}</p>
+        <p><strong>Created:</strong> {trip_data['created_at']}</p>
+        <p><strong>Pickup:</strong> {trip_data['pickup']}</p>
+        <p><strong>Destination:</strong> {trip_data['destination']}</p>
+        <p><strong>State:</strong> {trip_data['state']}</p>
+        <p><strong>Distance:</strong> {trip_data['distance']} km</p>
+    </section>
+    
+    <section class="card" style="margin-top:1rem;">
+        <h3>Trip Object Information</h3>
+        <p><strong>Strategy Used:</strong> {trip_obj.fare_strategy.get_strategy_name()}</p>
+        <p><strong>Strategy Description:</strong> {trip_obj.fare_strategy.get_description()}</p>
+        <p><strong>Calculated Fare:</strong> ${trip_obj.base_fare:.2f}</p>
+        <p><strong>Object State:</strong> {trip_obj.state.value}</p>
+        <p><strong>Trip Object ID:</strong> {trip_obj.trip_id}</p>
+    </section>
+    
+    <section class="card" style="margin-top:1rem;">
+        <h3>Integration Demo</h3>
+        <p class="muted">
+            This page shows how the Trip object from trip_management.py integrates with the web interface.
+            The fare calculation uses the Strategy pattern, and state changes use the Observer pattern.
+        </p>
+    </section>
+    """
+    
+    body = render_template_string(trip_details_body)
     return render_template_string(BASE_HTML, body=body)
