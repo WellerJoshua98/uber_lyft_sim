@@ -1,6 +1,6 @@
 ## Coded with help from chat gpt
 from typing import Optional
-from flask import Blueprint, Flask, render_template_string, request, url_for, redirect, session
+from flask import Blueprint, Flask, render_template_string, request, url_for, redirect, session, flash
 import folium
 import db
 from trip_management import Trip
@@ -13,10 +13,103 @@ def make_map():
     fmap = folium.Map(location=[40.758, -73.9855], zoom_start=12, tiles="OpenStreetMap")
     return fmap._repr_html_()
 
-# Keep legacy fare calculation for compatibility, but prefer Trip class methods
-fare_strategy = {"Standard": 10.00, "Surge": 16.00, "Premium": 20.00}
-def calculate_fare(strategy: str) -> float:
-    return fare_strategy.get(strategy, 10.00)
+def get_strategy_descriptions() -> dict:
+    """Get descriptions for all available fare strategies"""
+    strategies = {}
+    try:
+        for strategy_name in FareStrategyFactory.get_available_strategies():
+            strategy_obj = FareStrategyFactory.create_strategy(strategy_name)
+            strategies[strategy_name] = {
+                "description": strategy_obj.get_description(),
+                "details": ""  # Could add more detailed breakdown if needed
+            }
+    except Exception as e:
+        print(f"Error getting strategy descriptions: {e}")
+        # Fallback descriptions
+        strategies = {
+            "Standard": {"description": "Standard fare calculation", "details": ""},
+            "Surge": {"description": "Surge pricing during high demand", "details": ""},
+            "Premium": {"description": "Premium service with luxury vehicles", "details": ""}
+        }
+    return strategies
+
+def get_available_riders_with_status():
+    """Get all riders with their availability status"""
+    riders = db.get_all_riders()
+    rider_list = []
+    
+    for rider_row in riders:
+        rider_id, name, rating, role, created_at = rider_row
+        # Check if rider has active trip
+        active_trip = db.get_active_trip_for_rider(rider_id)
+        
+        rider_info = {
+            "id": rider_id,
+            "name": name,
+            "rating": float(rating),
+            "created_at": created_at,
+            "available": active_trip is None,
+            "active_trip_status": active_trip[1] if active_trip else None
+        }
+        rider_list.append(rider_info)
+    
+    return rider_list
+
+def create_rider_from_user_id(user_id: int) -> Rider:
+    """Create a Rider object from a user_id with database lookup"""
+    try:
+        user_record = db.get_user_by_id(user_id)
+        if user_record:
+            # users table layout: id, name, rating, role, created_at
+            db_id, db_name, db_rating, db_role, db_created_at = user_record
+            # Generate email from name (since DB doesn't have email field)
+            email = f"{db_name.lower().replace(' ', '').replace('-', '')}@example.com" if db_name else "user@example.com"
+            phone = ""  # DB doesn't have phone field
+            
+            return Rider(user_id=str(db_id), name=db_name, email=email, phone=phone)
+    except Exception as e:
+        print(f"Error looking up user {user_id}: {e}")
+    
+    # Fallback to guest rider if lookup fails
+    return Rider(user_id=str(user_id) if user_id else "guest", name="Anonymous Rider", email="guest@example.com", phone="")
+
+def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
+    """Get fare estimate with strategy details for preview"""
+    try:
+        # Create strategy instance to get details
+        fare_strategy = FareStrategyFactory.create_strategy(strategy)
+        
+        # Estimate distance and duration
+        distance = estimate_distance(pickup, destination)
+        duration = estimate_eta(pickup, destination)
+        
+        # Calculate fare using the actual strategy
+        fare = fare_strategy.calculate_fare(distance, duration)
+        
+        return {
+            "fare": fare,
+            "strategy_name": fare_strategy.get_strategy_name(),
+            "strategy_description": fare_strategy.get_description(),
+            "distance_km": distance,
+            "duration_min": duration,
+            "breakdown": {
+                "base_fare": getattr(fare_strategy, 'BASE_FARE', 0),
+                "per_km_rate": getattr(fare_strategy, 'PER_KM_RATE', 0),
+                "per_minute_rate": getattr(fare_strategy, 'PER_MINUTE_RATE', 0),
+                "surge_multiplier": getattr(fare_strategy, 'SURGE_MULTIPLIER', 1.0)
+            }
+        }
+    except Exception as e:
+        print(f"Error calculating fare estimate: {e}")
+        # Fallback to default values
+        return {
+            "fare": 10.0,
+            "strategy_name": strategy,
+            "strategy_description": f"{strategy} fare calculation",
+            "distance_km": 5.0,
+            "duration_min": 10.0,
+            "breakdown": {}
+        }
 
 def estimate_distance(pickup: str, destination: str) -> float:
     # Stub function: In real app, calculate based on addresses
@@ -99,10 +192,23 @@ BASE_HTML = """
      nav a { margin-right:.5rem; }
     .pill { padding:.2rem .6rem; border-radius:999px; background:#eef; font-size:.85rem; }
     .card { border:1px solid #e5e7eb; border-radius:12px; padding:1rem; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+    .flash { margin: 1rem 0; padding: 1rem; border-radius: 8px; }
+    .flash.success { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+    .flash.error { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+    .flash.info { background: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }
   </style>
 </head>
 <body>
   <main class="container">
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    
     {{ body|safe }}
   </main>
 </body>
@@ -116,38 +222,155 @@ HOME_BODY = """
     </nav>
 
     <h2>Rider Homepage</h2>
-    <p class="muted">Enter pickup and destination, choose fare strategy, and preview or request a trip.</p>
+    <p class="muted">Select a rider, then enter pickup and destination to request a trip.</p>
 
-   <section class="card">
-  <form method="POST" action="{{ url_for('rider_home.home') }}">
-    <div class="grid-2">
-      <label>
-        Pickup Address
-        <input type="text" name="pickup" placeholder="e.g., 350 5th Ave, New York, NY" value="{{ pickup or '' }}" required>
-      </label>
-      <label>
-        Destination Address
-        <input type="text" name="destination" placeholder="e.g., Times Square, New York, NY" value="{{ destination or '' }}" required>
-      </label>
-    </div>
+    <!-- Rider Selection Section -->
+    <section class="card" style="margin-bottom: 1rem;">
+        <h3 style="margin-top: 0;">Select Rider</h3>
+        
+        {% if available_riders %}
+        <form method="POST" action="{{ url_for('rider_home.home') }}">
+            <label>
+                Choose Rider
+                <select name="selected_rider_id" onchange="this.form.submit()" required>
+                    <option value="">-- Select a Rider --</option>
+                    {% for rider in available_riders %}
+                        <option value="{{ rider.id }}" 
+                                {% if selected_rider and selected_rider.id == rider.id %}selected{% endif %}
+                                {% if not rider.available %}disabled{% endif %}>
+                            {{ rider.name }} (★{{ "%.1f"|format(rider.rating) }})
+                            {% if not rider.available %}
+                                - BUSY ({{ rider.active_trip_status }})
+                            {% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </label>
+            <input type="hidden" name="action" value="select_rider">
+        </form>
+        
+        <div style="margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <a role="button" href="{{ url_for('rider_home.create_rider') }}" class="secondary" style="font-size: 0.9rem;">
+                + Add New Rider
+            </a>
+            {% if available_riders|length < 3 %}
+            <form method="POST" action="{{ url_for('rider_home.create_demo_riders') }}" style="display: inline;">
+                <button type="submit" class="secondary" style="font-size: 0.9rem;">+ Add Demo Riders</button>
+            </form>
+            {% endif %}
+        </div>
+        
+        {% else %}
+        <!-- No riders exist - show creation options -->
+        <div style="text-align: center; padding: 2rem; background: #f8f9fa; border-radius: 8px;">
+            <h4 style="margin: 0 0 1rem 0; color: #666;">No Riders Found</h4>
+            <p style="margin: 0 0 1.5rem 0; color: #666;">
+                There are no riders in the system yet. Create your first rider to get started.
+            </p>
+            <div style="display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;">
+                <a role="button" href="{{ url_for('rider_home.create_rider') }}">
+                    + Create New Rider
+                </a>
+                <form method="POST" action="{{ url_for('rider_home.create_demo_riders') }}" style="display: inline;">
+                    <button type="submit" class="secondary">+ Add Demo Riders</button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if selected_rider %}
+            <div style="margin-top: 1rem; padding: 1rem; background: #e8f5e8; border-radius: 8px; border-left: 4px solid #4CAF50;">
+                <strong>Selected Rider:</strong> {{ selected_rider.name }} 
+                <span style="color: #666;">(★{{ "%.1f"|format(selected_rider.rating) }}, Member since {{ selected_rider.created_at[:10] }})</span>
+                {% if not selected_rider.available %}
+                    <div style="color: #f44336; margin-top: 0.5rem;">
+                        ⚠️ <strong>This rider has an active trip ({{ selected_rider.active_trip_status }})</strong>
+                        <br>Please select a different rider or wait until current trip is completed.
+                    </div>
+                {% endif %}
+            </div>
+        {% endif %}
+    </section>
 
-    <label>
-      Fare Strategy
-      <select name="strategy">
-        {% for s in ["Standard", "Surge", "Premium"] %}
-          <option value="{{ s }}" {% if s == strategy %}selected{% endif %}>{{ s }}</option>
-        {% endfor %}
-      </select>
-    </label>
+    <!-- Trip Request Form (only shown if rider selected and available) -->
+    {% if selected_rider and selected_rider.available %}
+    <section class="card">
+        <h3 style="margin-top: 0;">Request Trip for {{ selected_rider.name }}</h3>
+        <form method="POST" action="{{ url_for('rider_home.home') }}">
+            <input type="hidden" name="selected_rider_id" value="{{ selected_rider.id }}">
+            
+            <div class="grid-2">
+                <label>
+                    Pickup Address
+                    <input type="text" name="pickup" placeholder="e.g., 350 5th Ave, New York, NY" value="{{ pickup or '' }}" required>
+                </label>
+                <label>
+                    Destination Address
+                    <input type="text" name="destination" placeholder="e.g., Times Square, New York, NY" value="{{ destination or '' }}" required>
+                </label>
+            </div>
 
-    <div class="actions">
-      <button type="submit" name="action" value="preview" class="contrast">Preview Route &amp; Fare</button>
-      <button type="submit" name="action" value="request">Request Trip</button>
-      <a role="button" href="{{ url_for('rider_home.past_trips') }}" class="secondary">View Past Trips</a>
-      <a role="button" href="{{ url_for('rider_home.advanced_trip') }}" class="secondary">Advanced Trip Demo</a>
-    </div>
-  </form>
-</section>
+            <label>
+                Fare Strategy
+                <select name="strategy" onchange="updateStrategyInfo(this.value)">
+                    {% for s in available_strategies %}
+                        <option value="{{ s }}" {% if s == strategy %}selected{% endif %}>{{ s }}</option>
+                    {% endfor %}
+                </select>
+                <div id="strategy-info" style="margin-top: 0.5rem; padding: 0.5rem; background: #f8f9fa; border-radius: 4px; font-size: 0.9rem; color: #666;">
+                    <span id="strategy-description">Select a strategy to see pricing details</span>
+                </div>
+            </label>
+
+            <script>
+                // Strategy descriptions (loaded from Python)
+                const strategyInfo = {
+                    {% for s in available_strategies %}
+                    "{{ s }}": {
+                        description: "{{ strategy_descriptions.get(s, {}).get('description', s + ' fare calculation') }}",
+                        details: "{{ strategy_descriptions.get(s, {}).get('details', '') }}"
+                    },
+                    {% endfor %}
+                };
+
+                function updateStrategyInfo(strategy) {
+                    const info = strategyInfo[strategy];
+                    const descElement = document.getElementById('strategy-description');
+                    if (info && descElement) {
+                        descElement.innerHTML = `<strong>${strategy}:</strong> ${info.description}${info.details ? '<br><small>' + info.details + '</small>' : ''}`;
+                    }
+                }
+
+                // Initialize on page load
+                document.addEventListener('DOMContentLoaded', function() {
+                    const strategySelect = document.querySelector('select[name="strategy"]');
+                    if (strategySelect) {
+                        updateStrategyInfo(strategySelect.value);
+                    }
+                });
+            </script>
+
+            <div class="actions">
+                <button type="submit" name="action" value="preview" class="contrast">Preview Route &amp; Fare</button>
+                <button type="submit" name="action" value="request">Request Trip</button>
+                <a role="button" href="{{ url_for('rider_home.past_trips') }}" class="secondary">View Past Trips</a>
+            </div>
+        </form>
+    </section>
+    {% elif selected_rider and not selected_rider.available %}
+    <!-- Message when rider is not available -->
+    <section class="card">
+        <h3 style="color: #f44336;">Rider Not Available</h3>
+        <p>{{ selected_rider.name }} currently has an active trip ({{ selected_rider.active_trip_status }}). 
+           Please select a different rider or wait until their current trip is completed.</p>
+    </section>
+    {% else %}
+    <!-- Message when no rider is selected -->
+    <section class="card">
+        <h3 style="color: #666;">No Rider Selected</h3>
+        <p style="color: #666;">Please select a rider from the dropdown above to continue with trip planning.</p>
+    </section>
+    {% endif %}
 
 {% if preview %}
 <section style="margin-top:1rem" class="card">
@@ -184,7 +407,31 @@ PREVIEW_BODY = """
 
   <p style="margin:.25rem 0;"><strong>Estimated ETA:</strong> {{ eta_min }} minutes</p>
   <p style="margin:.25rem 0;"><strong>Estimated Distance:</strong> {{ "%.1f"|format(distance_km) }} km</p>
-  <p style="margin:.25rem 0;"><strong>Estimated Fare:</strong> ${{ "%.2f"|format(fare) }}</p>
+  <p style="margin:.25rem 0;"><strong>Strategy Description:</strong> {{ strategy_description }}</p>
+  
+  <div style="border-left: 3px solid #4CAF50; padding-left: 1rem; margin: 1rem 0;">
+    <h4 style="margin: 0 0 0.5rem 0; color: #4CAF50;">Estimated Fare: ${{ "%.2f"|format(fare) }}</h4>
+    
+    {% if breakdown %}
+    <details>
+      <summary style="cursor: pointer; color: #666;">View fare breakdown</summary>
+      <div style="margin-top: 0.5rem; font-size: 0.9rem;">
+        {% if breakdown.base_fare %}
+        <p style="margin: 0.2rem 0;">Base fare: ${{ "%.2f"|format(breakdown.base_fare) }}</p>
+        {% endif %}
+        {% if breakdown.per_km_rate %}
+        <p style="margin: 0.2rem 0;">Distance ({{ "%.1f"|format(distance_km) }} km × ${{ "%.2f"|format(breakdown.per_km_rate) }}): ${{ "%.2f"|format(distance_km * breakdown.per_km_rate) }}</p>
+        {% endif %}
+        {% if breakdown.per_minute_rate %}
+        <p style="margin: 0.2rem 0;">Time ({{ "%.0f"|format(eta_min) }} min × ${{ "%.2f"|format(breakdown.per_minute_rate) }}): ${{ "%.2f"|format(eta_min * breakdown.per_minute_rate) }}</p>
+        {% endif %}
+        {% if breakdown.surge_multiplier and breakdown.surge_multiplier > 1.0 %}
+        <p style="margin: 0.2rem 0; color: #f44336;">Surge multiplier: {{ "%.1f"|format(breakdown.surge_multiplier) }}×</p>
+        {% endif %}
+      </div>
+    </details>
+    {% endif %}
+  </div>
 </section>
 
 <section class="card" style="margin-top:1rem;">
@@ -433,18 +680,43 @@ LIVE_TRIP_BODY = """
 def home():
     pickup = destination = ""
     strategy = "Standard"
-    preview = False
-    fare = None
+    selected_rider = None
+    selected_rider_id = None
+
+    # Get available riders
+    available_riders = get_available_riders_with_status()
 
     if request.method == "POST":
+        selected_rider_id = request.form.get("selected_rider_id")
         pickup = request.form.get("pickup", "").strip()
         destination = request.form.get("destination", "").strip()
         strategy = request.form.get("strategy", "Standard")
         action = request.form.get("action")
 
-        if action == "preview":
-            # Create trip object for preview with proper fare calculation
-            trip_obj = create_trip_with_objects(pickup, destination, strategy)
+        # Find selected rider from available riders
+        if selected_rider_id and selected_rider_id.isdigit():
+            selected_rider_id = int(selected_rider_id)
+            for rider in available_riders:
+                if rider["id"] == selected_rider_id:
+                    selected_rider = rider
+                    break
+
+        if action == "select_rider":
+            # Just selecting a rider, refresh page with rider selected
+            pass
+            
+        elif action == "preview":
+            # Validate rider selection and availability
+            if not selected_rider:
+                flash("Please select a rider first.", "error")
+                return redirect(url_for("rider_home.home"))
+            
+            if not selected_rider["available"]:
+                flash(f"Selected rider {selected_rider['name']} has an active trip. Please select a different rider.", "error")
+                return redirect(url_for("rider_home.home"))
+            
+            # Use integrated fare calculation for preview
+            fare_estimate = get_fare_estimate(pickup, destination, strategy)
             
             fmap_html = make_map()
 
@@ -453,28 +725,55 @@ def home():
                 pickup=pickup,
                 destination=destination,
                 strategy=strategy,
-                distance_km=trip_obj.distance_km,
-                eta_min=trip_obj.duration_min,
-                fare=trip_obj.base_fare,
+                distance_km=fare_estimate["distance_km"],
+                eta_min=fare_estimate["duration_min"],
+                fare=fare_estimate["fare"],
+                strategy_description=fare_estimate["strategy_description"],
+                breakdown=fare_estimate["breakdown"],
                 fmap=fmap_html
             )
 
             return render_template_string(BASE_HTML, body=body)
+            
         elif action == "confirm":
-             # Confirm from Trip Preview page: create trip object and save to DB
-            trip_obj = create_trip_with_objects(pickup, destination, strategy)
-            # Save to database using calculated fare from strategy pattern
-            db.create_trip(pickup, destination, strategy, trip_obj.base_fare)
+            # Confirm from Trip Preview page: validate rider and create trip
+            if not selected_rider or not selected_rider["available"]:
+                flash("Cannot create trip: rider not available.", "error")
+                return redirect(url_for("rider_home.home"))
+                
+            # Create rider object for the selected rider
+            rider = create_rider_from_user_id(selected_rider_id)
+            trip_obj = create_trip_with_objects(pickup, destination, strategy, rider)
+            # Save to database with rider ID
+            db.create_trip(pickup, destination, strategy, trip_obj.base_fare, selected_rider_id)
+            flash(f"Trip successfully requested for {selected_rider['name']}!", "success")
             return redirect(url_for("rider_home.past_trips"))
+            
         elif action == "cancel":
             # From Trip Preview: just go back to clean Rider Home
             return redirect(url_for("rider_home.home"))
+            
         elif action == "request":
-            # Create trip object and save to database with proper fare calculation
-            trip_obj = create_trip_with_objects(pickup, destination, strategy)
-            db.create_trip(pickup, destination, strategy, trip_obj.base_fare)
+            # Validate rider selection and availability
+            if not selected_rider:
+                flash("Please select a rider first.", "error")
+                return redirect(url_for("rider_home.home"))
+            
+            if not selected_rider["available"]:
+                flash(f"Cannot request trip: {selected_rider['name']} has an active trip ({selected_rider['active_trip_status']}).", "error")
+                return redirect(url_for("rider_home.home"))
+            
+            # Create rider object for the selected rider
+            rider = create_rider_from_user_id(selected_rider_id)
+            trip_obj = create_trip_with_objects(pickup, destination, strategy, rider)
+            # Save to database with rider ID
+            db.create_trip(pickup, destination, strategy, trip_obj.base_fare, selected_rider_id)
+            flash(f"Trip successfully requested for {selected_rider['name']}!", "success")
             return redirect(url_for("rider_home.past_trips"))
     
+    # Get available strategies from FareStrategyFactory
+    available_strategies = FareStrategyFactory.get_available_strategies()
+    strategy_descriptions = get_strategy_descriptions()
 
     fmap_html = make_map()
     body = render_template_string(
@@ -482,12 +781,125 @@ def home():
         pickup=pickup,
         destination=destination,
         strategy=strategy,
-        fmap=fmap_html,
-        preview=preview,
-        fare=fare
+        available_strategies=available_strategies,
+        strategy_descriptions=strategy_descriptions,
+        available_riders=available_riders,
+        selected_rider=selected_rider,
+        fmap=fmap_html
     )
 
     return render_template_string(BASE_HTML, body=body)
+
+@rider_home.route("/create-rider", methods=["GET", "POST"])
+def create_rider():
+    """Route for creating new riders"""
+    
+    if request.method == "POST":
+        rider_name = request.form.get("rider_name", "").strip()
+        rider_rating = request.form.get("rider_rating", "4.0")
+        
+        if not rider_name:
+            flash("Rider name is required.", "error")
+        elif len(rider_name) < 2:
+            flash("Rider name must be at least 2 characters long.", "error")
+        else:
+            try:
+                # Validate rating
+                rating_float = float(rider_rating)
+                if rating_float < 1.0 or rating_float > 5.0:
+                    flash("Rating must be between 1.0 and 5.0.", "error")
+                else:
+                    # Create the rider
+                    rider_id = db.create_user(rider_name, str(rating_float), "rider")
+                    flash(f"Successfully created rider: {rider_name} (★{rating_float})", "success")
+                    return redirect(url_for("rider_home.home"))
+            except ValueError:
+                flash("Invalid rating format. Please use numbers like 4.5", "error")
+            except Exception as e:
+                flash(f"Error creating rider: {str(e)}", "error")
+    
+    create_rider_body = """
+    <nav>
+        <a href="{{ url_for('rider_home.home') }}" class="secondary">Back to Rider Home</a>
+        <a href="{{ url_for('driver_home.home') }}" class="secondary">Driver Home</a>
+    </nav>
+
+    <h2>Create New Rider</h2>
+    <p class="muted">Add a new rider to the system.</p>
+
+    <section class="card">
+        <h3 style="margin-top: 0;">Rider Information</h3>
+        <form method="POST" action="{{ url_for('rider_home.create_rider') }}">
+            <label>
+                Rider Name *
+                <input type="text" name="rider_name" placeholder="e.g., John Smith" required 
+                       value="{{ request.form.get('rider_name', '') }}" maxlength="100">
+                <small>Enter the full name of the rider</small>
+            </label>
+
+            <label>
+                Initial Rating
+                <select name="rider_rating">
+                    <option value="5.0" {% if request.form.get('rider_rating') == '5.0' %}selected{% endif %}>★★★★★ 5.0 - Excellent</option>
+                    <option value="4.5" {% if request.form.get('rider_rating', '4.0') == '4.5' %}selected{% endif %}>★★★★☆ 4.5 - Very Good</option>
+                    <option value="4.0" {% if request.form.get('rider_rating', '4.0') == '4.0' %}selected{% endif %}>★★★★☆ 4.0 - Good</option>
+                    <option value="3.5" {% if request.form.get('rider_rating') == '3.5' %}selected{% endif %}>★★★☆☆ 3.5 - Average</option>
+                    <option value="3.0" {% if request.form.get('rider_rating') == '3.0' %}selected{% endif %}>★★★☆☆ 3.0 - Fair</option>
+                </select>
+                <small>New riders typically start with a 4.0 rating</small>
+            </label>
+
+            <div class="actions">
+                <button type="submit">Create Rider</button>
+                <a role="button" href="{{ url_for('rider_home.home') }}" class="secondary">Cancel</a>
+            </div>
+        </form>
+    </section>
+
+    <section class="card" style="margin-top: 1rem;">
+        <h3 style="margin-top: 0;">Quick Add Demo Riders</h3>
+        <p class="muted">Need some sample riders for testing? Click below to add demo riders.</p>
+        
+        <form method="POST" action="{{ url_for('rider_home.create_demo_riders') }}" style="display: inline;">
+            <button type="submit" class="secondary">Add Demo Riders</button>
+        </form>
+        
+        <small style="color: #666; margin-left: 1rem;">
+            This will create 5 sample riders with different ratings
+        </small>
+    </section>
+    """
+    
+    body = render_template_string(create_rider_body)
+    return render_template_string(BASE_HTML, body=body)
+
+@rider_home.route("/create-demo-riders", methods=["POST"])
+def create_demo_riders():
+    """Create demo riders for testing"""
+    
+    demo_riders = [
+        ("Alice Johnson", "4.9"),
+        ("Michael Chen", "4.7"), 
+        ("Sarah Williams", "4.5"),
+        ("David Rodriguez", "4.2"),
+        ("Emily Davis", "4.8")
+    ]
+    
+    created_count = 0
+    
+    for name, rating in demo_riders:
+        try:
+            db.create_user(name, rating, "rider")
+            created_count += 1
+        except Exception as e:
+            print(f"Error creating demo rider {name}: {e}")
+    
+    if created_count > 0:
+        flash(f"Successfully created {created_count} demo riders!", "success")
+    else:
+        flash("Error creating demo riders. They may already exist.", "error")
+    
+    return redirect(url_for("rider_home.home"))
 
 
 @rider_home.route("/trips")

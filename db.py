@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT NOT NULL,
     rating Text NOT NULL,
     role TEXT CHECK(role IN ('rider','driver')) DEFAULT 'rider',
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    vehicle_type TEXT,
+    license_plate TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trip_reviews (
@@ -54,6 +56,25 @@ def connect():
 def init_db():
     with connect() as con:
         con.executescript(SCHEMA)
+        # Add vehicle columns if they don't exist (for existing databases)
+        migrate_vehicle_columns()
+
+def migrate_vehicle_columns():
+    """Add vehicle columns to existing users table if they don't exist"""
+    with connect() as con:
+        cur = con.cursor()
+        
+        # Check if vehicle_type column exists
+        cur.execute("PRAGMA table_info(users)")
+        columns = [column[1] for column in cur.fetchall()]
+        
+        if 'vehicle_type' not in columns:
+            cur.execute("ALTER TABLE users ADD COLUMN vehicle_type TEXT")
+            print("Added vehicle_type column to users table")
+        
+        if 'license_plate' not in columns:
+            cur.execute("ALTER TABLE users ADD COLUMN license_plate TEXT")
+            print("Added license_plate column to users table")
 
 #Trip Helpers
 def create_trip(pickup: str, destination: str, strategy: str, fare: float, user_id: int = None) -> int:
@@ -112,12 +133,12 @@ def get_driver_for_trip(trip_id: int):
         return cur.fetchone()
 
 # --- Users Helper ---
-def create_user(name: str, rating: str, role: str) -> int:
+def create_user(name: str, rating: str, role: str, vehicle_type: str = None, license_plate: str = None) -> int:
     with connect() as con:
         cur = con.cursor()
         cur.execute(
-            "INSERT INTO users (name, rating, role) VALUES (?, ?, ?)",
-            (name, rating, role)
+            "INSERT INTO users (name, rating, role, vehicle_type, license_plate) VALUES (?, ?, ?, ?, ?)",
+            (name, rating, role, vehicle_type, license_plate)
         )
         user_id = cur.lastrowid
         if user_id is None:
@@ -129,10 +150,70 @@ def get_user_by_id(user_id: int):
     with connect() as con:
         cur = con.cursor()
         cur.execute(
-            "SELECT id, name, rating, role, created_at FROM users WHERE id = ?",
+            "SELECT id, name, rating, role, created_at, vehicle_type, license_plate FROM users WHERE id = ?",
             (user_id,)
         )
         return cur.fetchone()
+
+def update_user_vehicle_info(user_id: int, vehicle_type: str, license_plate: str):
+    """Update vehicle information for a driver"""
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE users SET vehicle_type = ?, license_plate = ? WHERE id = ? AND role = 'driver'",
+            (vehicle_type, license_plate, user_id)
+        )
+
+def get_all_riders():
+    """Get all users with role 'rider' from the database"""
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id, name, rating, role, created_at, vehicle_type, license_plate FROM users WHERE role = 'rider' ORDER BY name",
+        )
+        return cur.fetchall()
+
+def get_active_trip_for_rider(user_id: int):
+    """Check if a rider has any active trips (requested, accepted, in_progress)"""
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id, state FROM trips WHERE user_id = ? AND state IN ('requested', 'accepted', 'in_progress') ORDER BY created_at DESC LIMIT 1",
+            (user_id,)
+        )
+        return cur.fetchone()
+
+def get_all_drivers():
+    """Get all users with role 'driver' from the database"""
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id, name, rating, role, created_at, vehicle_type, license_plate FROM users WHERE role = 'driver' ORDER BY name",
+        )
+        return cur.fetchall()
+
+def get_active_trip_for_driver(driver_id: int):
+    """Check if a driver has any active trips (accepted, in_progress)"""
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id, state FROM trips WHERE driver_id = ? AND state IN ('accepted', 'in_progress') ORDER BY created_at DESC LIMIT 1",
+            (driver_id,)
+        )
+        return cur.fetchone()
+
+def assign_driver_to_trip(trip_id: int, driver_id: int):
+    """Assign a driver to a trip"""
+    with connect() as con:
+        con.execute(
+            "UPDATE trips SET driver_id = ?, state = 'accepted' WHERE id = ? AND state = 'requested'",
+            (driver_id, trip_id)
+        )
+        # Return whether the assignment was successful
+        cur = con.cursor()
+        cur.execute("SELECT driver_id, state FROM trips WHERE id = ?", (trip_id,))
+        result = cur.fetchone()
+        return result and result[0] == driver_id and result[1] == 'accepted'
 
 def get_all_users(limit: int = 50):
     with connect() as con:
