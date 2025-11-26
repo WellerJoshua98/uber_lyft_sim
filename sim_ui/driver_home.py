@@ -17,8 +17,8 @@ def create_rider_from_trip_data(trip_row) -> Rider:
             # Look up the actual user in the database
             user_record = db.get_user_by_id(user_id)
             if user_record:
-                # users table layout: id, name, rating, role, created_at
-                db_id, db_name, db_rating, db_role, db_created_at = user_record
+                # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
+                db_id, db_name, db_rating, db_role, db_created_at, vehicle_type, license_plate = user_record
                 # Generate email from name (since DB doesn't have email field)
                 email = f"{db_name.lower().replace(' ', '').replace('-', '')}@example.com" if db_name else "user@example.com"
                 phone = ""  # DB doesn't have phone field
@@ -35,8 +35,8 @@ def create_rider_from_user_id(user_id: int) -> Rider:
     try:
         user_record = db.get_user_by_id(user_id)
         if user_record:
-            # users table layout: id, name, rating, role, created_at
-            db_id, db_name, db_rating, db_role, db_created_at = user_record
+            # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
+            db_id, db_name, db_rating, db_role, db_created_at, vehicle_type, license_plate = user_record
             # Generate email from name (since DB doesn't have email field)
             email = f"{db_name.lower().replace(' ', '').replace('-', '')}@example.com" if db_name else "user@example.com"
             phone = ""  # DB doesn't have phone field
@@ -232,7 +232,6 @@ BASE_HTML = """
 HOME_BODY = """
 <nav>
   <a href="{{ url_for('driver_home.home') }}"><strong>Driver Home</strong></a>
-  <a href="{{ url_for('driver_home.advanced_driver') }}" class="contrast">Advanced Driver Demo</a>
   <a href="{{ url_for('rider_home.home') }}" class="secondary">Rider Home</a>
 </nav>
 
@@ -310,10 +309,6 @@ HOME_BODY = """
         
         <button type="submit">Create Driver</button>
       </fieldset>
-    </form>
-    
-    <form method="POST" action="{{ url_for('driver_home.create_demo_drivers') }}" style="margin-top: 1rem;">
-      <button type="submit" class="secondary">Create Demo Drivers</button>
     </form>
   </details>
 </section>
@@ -602,131 +597,6 @@ def trip_progress(trip_id):
         status_label=status_label,
         fmap=fmap_html,
     )
-    return render_template_string(BASE_HTML, body=body)
-
-@driver_home.route("/advanced-driver", methods=["GET", "POST"])
-def advanced_driver():
-    """Demonstrate advanced Trip object functionality from driver perspective"""
-    if request.method == "POST":
-        action = request.form.get("action")
-        trip_id = request.form.get("trip_id")
-        
-        if action == "simulate_trip_lifecycle" and trip_id and trip_id.isdigit():
-            trip_id_int = int(trip_id)
-            
-            # Get trip from database and create Trip object with proper rider lookup
-            row = db.get_trip_by_id(trip_id_int)
-            if row:
-                rider = create_rider_from_trip_data(row)
-                trip_obj = Trip(row[2], row[3], rider, row[4])
-                trip_obj.trip_id = trip_id_int
-                
-                # Create driver
-                driver = Driver(user_id="2", name="Advanced Driver", email="driver@example.com", phone="555-0456",
-                              vehicle_type="Tesla Model 3", license_plate="TESLA123")
-                
-                # Simulate complete trip lifecycle with Observer pattern
-                class DriverNotificationObserver:
-                    def __init__(self):
-                        self.notifications = []
-                    
-                    def update(self, trip, old_state, new_state):
-                        self.notifications.append(f"Driver notified: Trip {trip.trip_id} changed from {old_state.value} to {new_state.value}")
-                
-                observer = DriverNotificationObserver()
-                trip_obj.attach(observer)
-                
-                # Progress through states
-                trip_obj.accept(driver)
-                db.update_trip_from_object(trip_id_int, trip_obj)
-                
-                trip_obj.start()
-                db.update_trip_from_object(trip_id_int, trip_obj)
-                
-                trip_obj.complete()
-                db.update_trip_from_object(trip_id_int, trip_obj)
-                
-                return render_template_string(BASE_HTML, body=f"""
-                <nav>
-                    <a href="{{ url_for('driver_home.advanced_driver') }}" class="secondary">Back to Advanced Driver</a>
-                    <a href="{{ url_for('driver_home.home') }}" class="secondary">Driver Home</a>
-                </nav>
-                
-                <h2>Trip Lifecycle Simulation Complete</h2>
-                
-                <section class="card">
-                    <h3>Trip Object Information</h3>
-                    <p><strong>Trip ID:</strong> {trip_obj.trip_id}</p>
-                    <p><strong>Final State:</strong> {trip_obj.state.value}</p>
-                    <p><strong>Driver:</strong> {driver.name}</p>
-                    <p><strong>Vehicle:</strong> {driver.vehicle_type}</p>
-                    <p><strong>Strategy Used:</strong> {trip_obj.fare_strategy.get_strategy_name()}</p>
-                    <p><strong>Final Fare:</strong> ${trip_obj.base_fare:.2f}</p>
-                </section>
-                
-                <section class="card" style="margin-top:1rem;">
-                    <h3>Observer Notifications</h3>
-                    {'<br>'.join(observer.notifications)}
-                </section>
-                """)
-    
-    # Get available trips for demonstration
-    pending_requests = get_pending_trip_requests()
-    
-    advanced_driver_body = """
-    <nav>
-        <a href="{{ url_for('driver_home.home') }}" class="secondary">Back to Driver Home</a>
-        <a href="{{ url_for('rider_home.home') }}" class="secondary">Rider Home</a>
-    </nav>
-    
-    <h2>Advanced Driver Management</h2>
-    <p class="muted">Demonstration of Trip object integration from driver perspective</p>
-    
-    <section class="card">
-        <h3>Available Trip Requests</h3>
-        {% if requests %}
-            {% for req in requests %}
-            <article class="card" style="margin-bottom:1rem;">
-                <header style="display:flex;align-items:center;justify-content:space-between;">
-                    <div>
-                        <strong>{{ req.pickup }}</strong><br>
-                        <span style="font-size:.9rem;">to</span><br>
-                        <strong>{{ req.destination }}</strong>
-                    </div>
-                    <span class="pill">${{ "%.2f"|format(req.fare) }}</span>
-                </header>
-                
-                <p style="margin:.5rem 0;">
-                    <strong>Strategy:</strong> {{ req.strategy }}<br>
-                    <strong>Trip ID:</strong> {{ req.id }}
-                </p>
-                
-                <form method="POST" style="margin-top:.5rem;">
-                    <input type="hidden" name="trip_id" value="{{ req.id }}">
-                    <button type="submit" name="action" value="simulate_trip_lifecycle">
-                        Simulate Complete Trip Lifecycle
-                    </button>
-                </form>
-            </article>
-            {% endfor %}
-        {% else %}
-            <p class="muted">No pending trips. Create some trips from the Rider Home to test this feature.</p>
-        {% endif %}
-    </section>
-    
-    <section class="card" style="margin-top:1rem;">
-        <h3>Integration Features Demonstrated</h3>
-        <ul>
-            <li><strong>Observer Pattern:</strong> Real-time notifications when trip state changes</li>
-            <li><strong>State Management:</strong> Proper OOP state transitions (requested → accepted → in_progress → completed)</li>
-            <li><strong>Driver Assignment:</strong> Trip objects properly track assigned drivers</li>
-            <li><strong>Strategy Pattern:</strong> Different fare calculation strategies</li>
-            <li><strong>Database Sync:</strong> Trip objects sync with database automatically</li>
-        </ul>
-    </section>
-    """
-    
-    body = render_template_string(advanced_driver_body, requests=pending_requests)
     return render_template_string(BASE_HTML, body=body)
 
 @driver_home.route("/create-driver", methods=["POST"])

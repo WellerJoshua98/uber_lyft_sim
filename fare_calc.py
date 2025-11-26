@@ -100,8 +100,11 @@ class FareStrategyFactory:
     
     @classmethod
     def create_strategy(cls, strategy_name: str) -> FareStrategy:
-        """Create a fare strategy by name"""
-        strategy_class = cls._strategies.get(strategy_name)
+        """Create a fare strategy by name (case-insensitive)"""
+        # Normalize strategy name to title case for lookup
+        normalized_name = strategy_name.strip().title()
+        
+        strategy_class = cls._strategies.get(normalized_name)
         if not strategy_class:
             raise ValueError(f"Unknown strategy: {strategy_name}. "
                            f"Available: {list(cls._strategies.keys())}")

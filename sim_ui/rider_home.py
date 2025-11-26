@@ -39,7 +39,8 @@ def get_available_riders_with_status():
     rider_list = []
     
     for rider_row in riders:
-        rider_id, name, rating, role, created_at = rider_row
+        # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
+        rider_id, name, rating, role, created_at, vehicle_type, license_plate = rider_row
         # Check if rider has active trip
         active_trip = db.get_active_trip_for_rider(rider_id)
         
@@ -60,8 +61,8 @@ def create_rider_from_user_id(user_id: int) -> Rider:
     try:
         user_record = db.get_user_by_id(user_id)
         if user_record:
-            # users table layout: id, name, rating, role, created_at
-            db_id, db_name, db_rating, db_role, db_created_at = user_record
+            # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
+            db_id, db_name, db_rating, db_role, db_created_at, vehicle_type, license_plate = user_record
             # Generate email from name (since DB doesn't have email field)
             email = f"{db_name.lower().replace(' ', '').replace('-', '')}@example.com" if db_name else "user@example.com"
             phone = ""  # DB doesn't have phone field
@@ -146,9 +147,9 @@ def create_trip_with_objects(pickup: str, destination: str, strategy: str, rider
         user_record = None
 
       if user_record:
-        # users table layout: id, name, rating, role, created_at
+        # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
         # Map database fields to Rider constructor parameters
-        db_id, db_name, db_rating, db_role, db_created_at = user_record
+        db_id, db_name, db_rating, db_role, db_created_at, vehicle_type, license_plate = user_record
         # Generate email from name (since DB doesn't have email field)
         email = f"{db_name.lower().replace(' ', '').replace('-', '')}@example.com" if db_name else "user@example.com"
         # Use empty phone since DB doesn't have phone field
@@ -492,7 +493,7 @@ TRIPS_BODY = """
 
 TRIP_SUMMARY_BODY = """
 <nav>
-  <a href="{{ url_for('rider_home.trips') }}" class="secondary">Back to Past Trips</a>
+  <a href="{{ url_for('rider_home.past_trips') }}" class="secondary">Back to Past Trips</a>
   <a href="{{ url_for('driver_home.home') }}" class="secondary">Driver Home</a>
 </nav>
 
@@ -555,7 +556,7 @@ TRIP_SUMMARY_BODY = """
 TRIP_RECEIPT_BODY = """
 <nav>
   <a href="{{ url_for('rider_home.trip_summary', trip_id=trip.id) }}" class="secondary">Back to Trip Summary</a>
-  <a href="{{ url_for('rider_home.trips') }}" class="secondary">Past Trips</a>
+  <a href="{{ url_for('rider_home.past_trips') }}" class="secondary">Past Trips</a>
 </nav>
 
 <h2>Trip Receipt</h2>
@@ -609,7 +610,7 @@ NO_DRIVERS_BODY = """
 
 LIVE_TRIP_BODY = """
 <nav>
-  <a href="{{ url_for('rider_home.trips') }}" class="secondary">Past Trips</a>
+  <a href="{{ url_for('rider_home.past_trips') }}" class="secondary">Past Trips</a>
   <a href="{{ url_for('rider_home.home') }}" class="secondary">Rider Home</a>
 </nav>
 
