@@ -6,11 +6,61 @@ import db
 from trip_management import Trip
 from user_classes import Rider, Driver, TripState
 from fare_calc import FareStrategyFactory
+from map_integration import MapService, MockMapService
 
 rider_home = Blueprint("rider_home", __name__)
 
-def make_map():
-    fmap = folium.Map(location=[40.758, -73.9855], zoom_start=12, tiles="OpenStreetMap")
+# Initialize map service (use Mock if no API key available)
+try:
+    map_service = MapService()
+    print("Using real MapService with OpenRouteService API")
+except ValueError:
+    map_service = MockMapService()
+    print("Using MockMapService (no API key found)")
+
+def make_map(pickup_coords=None, dest_coords=None):
+    """Enhanced map generation with route visualization"""
+    # Default center (NYC)
+    center_lat, center_lon = 40.758, -73.9855
+    
+    if pickup_coords and dest_coords:
+        # Center the map between pickup and destination
+        center_lat = (pickup_coords[0] + dest_coords[0]) / 2
+        center_lon = (pickup_coords[1] + dest_coords[1]) / 2
+    elif pickup_coords:
+        center_lat, center_lon = pickup_coords
+    elif dest_coords:
+        center_lat, center_lon = dest_coords
+    
+    fmap = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
+    
+    # Add markers if coordinates are provided
+    if pickup_coords:
+        folium.Marker(
+            pickup_coords,
+            popup="Pickup Location",
+            tooltip="Pickup",
+            icon=folium.Icon(color="green", icon="play")
+        ).add_to(fmap)
+    
+    if dest_coords:
+        folium.Marker(
+            dest_coords,
+            popup="Destination",
+            tooltip="Destination", 
+            icon=folium.Icon(color="red", icon="stop")
+        ).add_to(fmap)
+    
+    # Draw route line if both points exist
+    if pickup_coords and dest_coords:
+        folium.PolyLine(
+            [pickup_coords, dest_coords],
+            weight=5,
+            color="blue",
+            opacity=0.8,
+            popup="Route"
+        ).add_to(fmap)
+    
     return fmap._repr_html_()
 
 def get_strategy_descriptions() -> dict:
@@ -34,25 +84,37 @@ def get_strategy_descriptions() -> dict:
     return strategies
 
 def get_available_riders_with_status():
-    """Get all riders with their availability status"""
+    """Get all riders with their availability and active trip status"""
     riders = db.get_all_riders()
     rider_list = []
     
     for rider_row in riders:
-        # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
-        rider_id, name, rating, role, created_at, vehicle_type, license_plate = rider_row
-        # Check if rider has active trip
-        active_trip = db.get_active_trip_for_rider(rider_id)
-        
-        rider_info = {
-            "id": rider_id,
-            "name": name,
-            "rating": float(rating),
-            "created_at": created_at,
-            "available": active_trip is None,
-            "active_trip_status": active_trip[1] if active_trip else None
-        }
-        rider_list.append(rider_info)
+        try:
+            # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
+            rider_id, name, rating, role, created_at, vehicle_type, license_plate = rider_row
+            
+            # Skip riders with invalid data
+            if not name or not name.strip():
+                print(f"Skipping rider with empty name: ID {rider_id}")
+                continue
+                
+            # Check if rider has active trip
+            active_trip = db.get_active_trip_for_rider(rider_id)
+            
+            rider_info = {
+                "id": rider_id,
+                "name": name.strip(),
+                "rating": float(rating) if rating else 4.0,
+                "created_at": created_at,
+                "available": active_trip is None,
+                "active_trip": active_trip,  # Full trip data if exists
+                "active_trip_status": active_trip[6] if active_trip else None,  # Trip status
+                "active_trip_id": active_trip[0] if active_trip else None  # Trip ID
+            }
+            rider_list.append(rider_info)
+        except Exception as e:
+            print(f"Error processing rider row {rider_row}: {e}")
+            continue
     
     return rider_list
 
@@ -75,14 +137,28 @@ def create_rider_from_user_id(user_id: int) -> Rider:
     return Rider(user_id=str(user_id) if user_id else "guest", name="Anonymous Rider", email="guest@example.com", phone="")
 
 def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
-    """Get fare estimate with strategy details for preview"""
+    """Get fare estimate with strategy details for preview using real map data"""
     try:
         # Create strategy instance to get details
         fare_strategy = FareStrategyFactory.create_strategy(strategy)
         
-        # Estimate distance and duration
-        distance = estimate_distance(pickup, destination)
-        duration = estimate_eta(pickup, destination)
+        # Get real route data from map service
+        route_info = map_service.calculate_trip_route(pickup, destination)
+        
+        if route_info:
+            distance = route_info["distance_km"]
+            duration = route_info["duration_min"]
+            
+            # Store route coordinates for map display
+            pickup_coords = route_info["pickup_coords"]
+            dest_coords = route_info["destination_coords"]
+        else:
+            # Fallback to estimation if map service fails
+            print(f"Map service failed, using fallback estimation")
+            distance = estimate_distance(pickup, destination)
+            duration = estimate_eta(pickup, destination)
+            pickup_coords = None
+            dest_coords = None
         
         # Calculate fare using the actual strategy
         fare = fare_strategy.calculate_fare(distance, duration)
@@ -93,6 +169,8 @@ def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
             "strategy_description": fare_strategy.get_description(),
             "distance_km": distance,
             "duration_min": duration,
+            "pickup_coords": pickup_coords,
+            "dest_coords": dest_coords,
             "breakdown": {
                 "base_fare": getattr(fare_strategy, 'BASE_FARE', 0),
                 "per_km_rate": getattr(fare_strategy, 'PER_KM_RATE', 0),
@@ -109,12 +187,37 @@ def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
             "strategy_description": f"{strategy} fare calculation",
             "distance_km": 5.0,
             "duration_min": 10.0,
+            "pickup_coords": None,
+            "dest_coords": None,
             "breakdown": {}
         }
 
 def estimate_distance(pickup: str, destination: str) -> float:
+    """Estimate distance using map service, with fallback"""
+    try:
+        route_info = map_service.calculate_trip_route(pickup, destination)
+        if route_info:
+            return route_info["distance_km"]
+    except Exception as e:
+        print(f"Map service error in estimate_distance: {e}")
+    
+    # Fallback to simple estimation
+    return estimate_distance(pickup, destination)
+
+def estimate_eta(pickup: str, destination: str) -> float:
+    """Estimate ETA using map service, with fallback"""
+    try:
+        route_info = map_service.calculate_trip_route(pickup, destination)
+        if route_info:
+            return route_info["duration_min"]
+    except Exception as e:
+        print(f"Map service error in estimate_eta: {e}")
+    
+    # Fallback to simple estimation
+    return estimate_eta(pickup, destination)
+
+def estimate_distance(pickup: str, destination: str) -> float:
     # Stub function: In real app, calculate based on addresses
-    # Return float for compatibility with Trip class
     return 5.0
 
 def estimate_eta(pickup: str, destination: str) -> float:
@@ -166,9 +269,21 @@ def create_trip_with_objects(pickup: str, destination: str, strategy: str, rider
   # Create trip object
   trip = Trip(pickup, destination, rider, strategy)
 
-  # Set route info and calculate fare using strategy pattern
-  distance = estimate_distance(pickup, destination)
-  duration = estimate_eta(pickup, destination)
+  # Set route info using map service for more accurate data
+  try:
+    route_info = map_service.calculate_trip_route(pickup, destination)
+    if route_info:
+      distance = route_info["distance_km"]
+      duration = route_info["duration_min"]
+    else:
+      # Fallback to estimation
+      distance = estimate_distance(pickup, destination)
+      duration = estimate_eta(pickup, destination)
+  except Exception as e:
+    print(f"Error getting route info in create_trip_with_objects: {e}")
+    distance = estimate_distance(pickup, destination)
+    duration = estimate_eta(pickup, destination)
+  
   trip.set_route_info(distance, duration)
 
   return trip
@@ -237,11 +352,10 @@ HOME_BODY = """
                     <option value="">-- Select a Rider --</option>
                     {% for rider in available_riders %}
                         <option value="{{ rider.id }}" 
-                                {% if selected_rider and selected_rider.id == rider.id %}selected{% endif %}
-                                {% if not rider.available %}disabled{% endif %}>
+                                {% if selected_rider and selected_rider.id == rider.id %}selected{% endif %}>
                             {{ rider.name }} (★{{ "%.1f"|format(rider.rating) }})
                             {% if not rider.available %}
-                                - BUSY ({{ rider.active_trip_status }})
+                                - ON TRIP ({{ rider.active_trip_status }})
                             {% endif %}
                         </option>
                     {% endfor %}
@@ -280,21 +394,55 @@ HOME_BODY = """
         {% endif %}
         
         {% if selected_rider %}
-            <div style="margin-top: 1rem; padding: 1rem; background: #e8f5e8; border-radius: 8px; border-left: 4px solid #4CAF50;">
+            <div style="margin-top: 1rem; padding: 1rem; border-radius: 8px; border-left: 4px solid #4CAF50; {% if selected_rider.available %}background: #e8f5e8;{% else %}background: #fff3cd; border-left-color: #ffc107;{% endif %}">
                 <strong>Selected Rider:</strong> {{ selected_rider.name }} 
                 <span style="color: #666;">(★{{ "%.1f"|format(selected_rider.rating) }}, Member since {{ selected_rider.created_at[:10] }})</span>
                 {% if not selected_rider.available %}
-                    <div style="color: #f44336; margin-top: 0.5rem;">
-                        ⚠️ <strong>This rider has an active trip ({{ selected_rider.active_trip_status }})</strong>
-                        <br>Please select a different rider or wait until current trip is completed.
+                    <div style="color: #856404; margin-top: 0.5rem;">
+                        🚗 <strong>Currently on trip ({{ selected_rider.active_trip_status }})</strong>
+                        <br>Manage current trip below or select a different rider to request a new trip.
                     </div>
                 {% endif %}
             </div>
         {% endif %}
     </section>
 
+    <!-- Active Trip Management (shown if rider has active trip) -->
+    {% if selected_rider and not selected_rider.available %}
+    <section class="card">
+        <h3 style="margin-top: 0;">🚗 Active Trip for {{ selected_rider.name }}</h3>
+        
+        {% if selected_rider.active_trip %}
+            <div style="background: #f8f9fa; padding: 1rem; border-radius: 6px; margin-bottom: 1rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <strong>Trip #{{ selected_rider.active_trip_id }}</strong>
+                    <span class="pill" style="background: #007bff; color: white;">{{ selected_rider.active_trip_status.title() }}</span>
+                </div>
+                
+                <p style="margin: 0.25rem 0;"><strong>Pickup:</strong> {{ selected_rider.active_trip[2] }}</p>
+                <p style="margin: 0.25rem 0;"><strong>Destination:</strong> {{ selected_rider.active_trip[3] }}</p>
+                <p style="margin: 0.25rem 0;"><strong>Fare:</strong> ${{ "%.2f"|format(selected_rider.active_trip[5]) }}</p>
+                <p style="margin: 0.25rem 0;"><strong>Strategy:</strong> {{ selected_rider.active_trip[4] }}</p>
+            </div>
+            
+            <div class="actions">
+                <a role="button" href="{{ url_for('rider_home.live_trip', trip_id=selected_rider.active_trip_id) }}" class="primary">
+                    📱 View Live Trip
+                </a>
+                <a role="button" href="{{ url_for('rider_home.trip_summary', trip_id=selected_rider.active_trip_id) }}" class="secondary">
+                    📋 Trip Details
+                </a>
+            </div>
+            
+            <p class="muted" style="margin-top: 1rem;">
+                💡 You can track your trip progress, contact your driver, or cancel the trip using the Live Trip view.
+                Once this trip is completed, you'll be able to request new trips.
+            </p>
+        {% endif %}
+    </section>
+    
     <!-- Trip Request Form (only shown if rider selected and available) -->
-    {% if selected_rider and selected_rider.available %}
+    {% elif selected_rider and selected_rider.available %}
     <section class="card">
         <h3 style="margin-top: 0;">Request Trip for {{ selected_rider.name }}</h3>
         <form method="POST" action="{{ url_for('rider_home.home') }}">
@@ -358,13 +506,6 @@ HOME_BODY = """
             </div>
         </form>
     </section>
-    {% elif selected_rider and not selected_rider.available %}
-    <!-- Message when rider is not available -->
-    <section class="card">
-        <h3 style="color: #f44336;">Rider Not Available</h3>
-        <p>{{ selected_rider.name }} currently has an active trip ({{ selected_rider.active_trip_status }}). 
-           Please select a different rider or wait until their current trip is completed.</p>
-    </section>
     {% else %}
     <!-- Message when no rider is selected -->
     <section class="card">
@@ -372,17 +513,6 @@ HOME_BODY = """
         <p style="color: #666;">Please select a rider from the dropdown above to continue with trip planning.</p>
     </section>
     {% endif %}
-
-{% if preview %}
-<section style="margin-top:1rem" class="card">
-  <header style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem">
-    <strong>Map Preview</strong>
-    <span class="pill">{{ strategy }}</span>
-  </header>
-  <div class="map">{{ fmap|safe }}</div>
-  <p class="muted" style="margin-top:.5rem">Stub fare estimate: <strong>${{ '%.2f'|format(fare) }}</strong></p>
-</section>
-{% endif %}
 """
 
 PREVIEW_BODY = """
@@ -439,7 +569,11 @@ PREVIEW_BODY = """
   <h3 style="margin-top:0;">Route Preview</h3>
   <div class="map">{{ fmap|safe }}</div>
   <p class="muted" style="margin-top:.5rem;">
-    Static preview map for now. Later, draw the actual route polyline between pickup and destination.
+    {% if pickup_coords and dest_coords %}
+      Interactive map showing the route from pickup to destination with markers and route line.
+    {% else %}
+      Map preview using estimated location. For real coordinates, ensure addresses are valid and map service is available.
+    {% endif %}
   </p>
 </section>
 
@@ -656,7 +790,7 @@ LIVE_TRIP_BODY = """
     <h3 style="margin-top:0;">Live Map</h3>
     <div class="map">{{ fmap|safe }}</div>
     <p class="muted" style="margin-top:.5rem;">
-      Static map preview for now. Later, update this with live driver position and route.
+      Live trip map showing pickup and destination locations with route visualization.
     </p>
   </section>
 
@@ -719,7 +853,10 @@ def home():
             # Use integrated fare calculation for preview
             fare_estimate = get_fare_estimate(pickup, destination, strategy)
             
-            fmap_html = make_map()
+            # Create enhanced map with route visualization
+            pickup_coords = fare_estimate.get("pickup_coords")
+            dest_coords = fare_estimate.get("dest_coords")
+            fmap_html = make_map(pickup_coords, dest_coords)
 
             body = render_template_string(
                 PREVIEW_BODY,
@@ -731,6 +868,8 @@ def home():
                 fare=fare_estimate["fare"],
                 strategy_description=fare_estimate["strategy_description"],
                 breakdown=fare_estimate["breakdown"],
+                pickup_coords=pickup_coords,
+                dest_coords=dest_coords,
                 fmap=fmap_html
             )
 
@@ -776,7 +915,19 @@ def home():
     available_strategies = FareStrategyFactory.get_available_strategies()
     strategy_descriptions = get_strategy_descriptions()
 
-    fmap_html = make_map()
+    # Create map with coordinates if pickup and destination are provided
+    pickup_coords = None
+    dest_coords = None
+    if pickup and destination:
+        try:
+            route_info = map_service.calculate_trip_route(pickup, destination)
+            if route_info:
+                pickup_coords = route_info["pickup_coords"]
+                dest_coords = route_info["destination_coords"]
+        except Exception as e:
+            print(f"Could not get route coordinates for home map: {e}")
+    
+    fmap_html = make_map(pickup_coords, dest_coords)
     body = render_template_string(
         HOME_BODY,
         pickup=pickup,
@@ -1014,7 +1165,33 @@ def live_trip(trip_id):
 
         trip["status_label"] = status_map.get(trip["state"], trip["state"].title())
         
-        driver = get_driver_for_trip(trip_id)
+        # Get driver info and convert to dictionary
+        driver_row = get_driver_for_trip(trip_id)
+        driver = None
+        if driver_row:
+            try:
+                # The JOIN query returns: users table + trips table
+                # users: id, name, rating, role, created_at, vehicle_type, license_plate  
+                # trips: id, created_at, pickup, destination, strategy, fare, state, distance, user_id, driver_id
+                driver = {
+                    "name": driver_row[1] if len(driver_row) > 1 else "Unknown Driver",
+                    "rating": float(driver_row[2]) if len(driver_row) > 2 and driver_row[2] else 4.0,
+                    "vehicle_color": "Blue",  # Mock data since not in DB
+                    "vehicle_model": driver_row[5] if len(driver_row) > 5 and driver_row[5] else "Toyota Prius",
+                    "vehicle_plate": driver_row[6] if len(driver_row) > 6 and driver_row[6] else "ABC123",
+                    "eta_min": 5  # Mock ETA
+                }
+            except Exception as e:
+                print(f"Error processing driver data: {e}")
+                # Fallback driver info
+                driver = {
+                    "name": "Unknown Driver",
+                    "rating": 4.0,
+                    "vehicle_color": "Blue",
+                    "vehicle_model": "Toyota Prius", 
+                    "vehicle_plate": "ABC123",
+                    "eta_min": 5
+                }
 
         if request.method == "POST":
             action = request.form.get("action")
@@ -1033,7 +1210,19 @@ def live_trip(trip_id):
                     "title": "Trip Cancelled",
                     "detail": "Your trip has been cancelled.",
                 }
-        fmap_html = make_map()
+        
+        # Try to get route coordinates for enhanced map display
+        pickup_coords = None
+        dest_coords = None
+        try:
+            route_info = map_service.calculate_trip_route(trip["pickup"], trip["destination"])
+            if route_info:
+                pickup_coords = route_info["pickup_coords"]
+                dest_coords = route_info["destination_coords"]
+        except Exception as e:
+            print(f"Could not get route coordinates for live trip: {e}")
+        
+        fmap_html = make_map(pickup_coords, dest_coords)
 
     body = render_template_string(
         LIVE_TRIP_BODY,

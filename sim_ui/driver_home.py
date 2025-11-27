@@ -4,8 +4,17 @@ import db
 from trip_management import Trip
 from user_classes import Rider, Driver, TripState
 from fare_calc import FareStrategyFactory
+from map_integration import MapService, MockMapService
 
 driver_home = Blueprint("driver_home", __name__)
+
+# Initialize map service (use Mock if no API key available)
+try:
+    map_service = MapService()
+    print("Driver Home: Using real MapService with OpenRouteService API")
+except ValueError:
+    map_service = MockMapService()
+    print("Driver Home: Using MockMapService (no API key found)")
 
 def create_rider_from_trip_data(trip_row) -> Rider:
     """Create a Rider object from trip database data with proper user lookup"""
@@ -100,11 +109,126 @@ def get_available_drivers_with_status():
     
     return driver_list
 
-# --------- Map helper for driver view ---------
-def make_driver_map():
-    # Static center for now; swap with real nav later
-    fmap = folium.Map(location=[40.758, -73.9855], zoom_start=12, tiles="OpenStreetMap")
+# --------- Enhanced Map helper for driver view ---------
+def make_driver_map(trip_pickup=None, trip_destination=None, driver_location=None, trip_status="requested"):
+    """Enhanced driver map with trip route and driver position simulation"""
+    # Default center (NYC)
+    center_lat, center_lon = 40.758, -73.9855
+    
+    # Try to get real coordinates if addresses are provided
+    pickup_coords = None
+    dest_coords = None
+    
+    if trip_pickup and trip_destination:
+        try:
+            route_info = map_service.calculate_trip_route(trip_pickup, trip_destination)
+            if route_info:
+                pickup_coords = route_info["pickup_coords"]
+                dest_coords = route_info["destination_coords"]
+                # Center map between pickup and destination
+                center_lat = (pickup_coords[0] + dest_coords[0]) / 2
+                center_lon = (pickup_coords[1] + dest_coords[1]) / 2
+        except Exception as e:
+            print(f"Could not get route coordinates for driver map: {e}")
+    
+    # Create map centered appropriately
+    fmap = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles="OpenStreetMap")
+    
+    # Add pickup marker if available
+    if pickup_coords:
+        pickup_icon = "play" if trip_status in ["requested", "accepted"] else "check"
+        pickup_color = "green" if trip_status in ["completed"] else "orange"
+        
+        folium.Marker(
+            pickup_coords,
+            popup=f"Pickup: {trip_pickup}",
+            tooltip="Pickup Location",
+            icon=folium.Icon(color=pickup_color, icon=pickup_icon)
+        ).add_to(fmap)
+    
+    # Add destination marker if available
+    if dest_coords:
+        dest_icon = "stop" if trip_status != "completed" else "flag"
+        dest_color = "red" if trip_status != "completed" else "green"
+        
+        folium.Marker(
+            dest_coords,
+            popup=f"Destination: {trip_destination}",
+            tooltip="Destination",
+            icon=folium.Icon(color=dest_color, icon=dest_icon)
+        ).add_to(fmap)
+    
+    # Add route line if both points exist
+    if pickup_coords and dest_coords:
+        route_color = "blue"
+        route_opacity = 0.8
+        
+        if trip_status == "in_progress":
+            route_color = "green"
+            route_opacity = 0.9
+        elif trip_status == "completed":
+            route_color = "gray"
+            route_opacity = 0.5
+        
+        folium.PolyLine(
+            [pickup_coords, dest_coords],
+            weight=5,
+            color=route_color,
+            opacity=route_opacity,
+            popup=f"Route ({trip_status})"
+        ).add_to(fmap)
+    
+    # Add simulated driver position
+    if driver_location:
+        folium.Marker(
+            driver_location,
+            popup="Driver Location",
+            tooltip="You are here",
+            icon=folium.Icon(color="blue", icon="car", prefix="fa")
+        ).add_to(fmap)
+    elif pickup_coords and trip_status in ["accepted", "in_progress"]:
+        # Simulate driver position based on trip status
+        if trip_status == "accepted":
+            # Driver is heading to pickup - place somewhere between default center and pickup
+            driver_lat = (center_lat + pickup_coords[0]) / 2
+            driver_lon = (center_lon + pickup_coords[1]) / 2
+        else:  # in_progress
+            # Driver is en route to destination - place somewhere between pickup and destination
+            driver_lat = (pickup_coords[0] + dest_coords[0]) / 2
+            driver_lon = (pickup_coords[1] + dest_coords[1]) / 2
+        
+        folium.Marker(
+            [driver_lat, driver_lon],
+            popup="Driver Location (Simulated)",
+            tooltip="Driver Position",
+            icon=folium.Icon(color="blue", icon="car", prefix="fa")
+        ).add_to(fmap)
+    
     return fmap._repr_html_()
+
+def get_trip_route_info(pickup_address: str, destination_address: str):
+    """Get route information for a trip to enhance driver navigation"""
+    try:
+        route_info = map_service.calculate_trip_route(pickup_address, destination_address)
+        if route_info:
+            return {
+                "distance_km": route_info["distance_km"],
+                "duration_min": route_info["duration_min"],
+                "pickup_coords": route_info["pickup_coords"],
+                "destination_coords": route_info["destination_coords"],
+                "has_real_data": True
+            }
+    except Exception as e:
+        print(f"Error getting route info: {e}")
+    
+    # Fallback to estimates
+    return {
+        "distance_km": 5.0,
+        "duration_min": 10.0,
+        "pickup_coords": None,
+        "destination_coords": None,
+        "has_real_data": False
+    }
 
 # --- Get real trip requests from database ---
 def get_pending_trip_requests():
@@ -133,6 +257,9 @@ def get_pending_trip_requests():
         trip_obj.trip_id = trip_data["id"]  # Use database ID
         trip_obj.set_route_info(float(trip_data["distance"]), 10.0)  # Mock duration
         
+        # Get enhanced route information for driver display
+        route_info = get_trip_route_info(trip_data["pickup"], trip_data["destination"])
+        
         # Convert to dictionary for template compatibility
         trip_request = {
             "id": trip_data["id"],
@@ -141,6 +268,10 @@ def get_pending_trip_requests():
             "fare": trip_obj.base_fare,  # Use calculated fare from strategy
             "eta": "Now",  # Mock ETA
             "strategy": trip_data["strategy"],
+            "created_at": trip_data["created_at"],
+            "distance_km": route_info["distance_km"],
+            "duration_min": route_info["duration_min"],
+            "has_real_data": route_info["has_real_data"],
             "trip_object": trip_obj  # Keep reference to Trip object
         }
         trip_objects.append(trip_request)
@@ -349,6 +480,18 @@ HOME_BODY = """
         </div>
         <p style="margin:.5rem 0 0 0"><strong>Pickup:</strong> {{ r.pickup }}</p>
         <p style="margin:.25rem 0 .5rem 0"><strong>Destination:</strong> {{ r.destination }}</p>
+        
+        <div style="display: flex; gap: 1rem; margin: .5rem 0; font-size: .9rem; color: #666;">
+          <span>📏 {{ "%.1f"|format(r.distance_km) }} km</span>
+          <span>⏱️ {{ "%.0f"|format(r.duration_min) }} min</span>
+          <span>🎯 {{ r.strategy }}</span>
+          {% if r.has_real_data %}
+            <span style="color: #28a745;">✅ Real route data</span>
+          {% else %}
+            <span style="color: #ffc107;">⚠️ Estimated</span>
+          {% endif %}
+        </div>
+        
         <p class="muted" style="margin:0">Created: {{ r.created_at }}</p>
 
         <form method="POST" action="{{ url_for('driver_home.home') }}" style="margin-top:.75rem">
@@ -402,14 +545,14 @@ TRIP_PROGRESS_BODY = """
     </header>
 
     <div class="stepper">
-      <span class="step {% if trip.status in ['to_pickup','to_destination','completed'] %}active{% endif %}">
-        To Pickup
+      <span class="step {% if trip.status in ['accepted','in_progress','completed'] %}active{% endif %}">
+        Trip Accepted
       </span>
-      <span class="step {% if trip.status in ['to_destination','completed'] %}active{% endif %}">
-        To Destination
+      <span class="step {% if trip.status in ['in_progress','completed'] %}active{% endif %}">
+        In Progress
       </span>
       <span class="step {% if trip.status == 'completed' %}active{% endif %}">
-        Complete
+        Completed
       </span>
     </div>
 
@@ -417,31 +560,72 @@ TRIP_PROGRESS_BODY = """
   </section>
 
   <section class="card" style="margin-top:1rem;">
-    <h3 style="margin-top:0;">Map Navigation</h3>
+    <h3 style="margin-top:0;">Driver Navigation</h3>
     <div class="map">{{ fmap|safe }}</div>
-    <p class="muted" style="margin-top:.5rem;">
-      Static navigation preview for now. Later, plug in live turn-by-turn routing.
-    </p>
+    <div style="margin-top:.5rem;">
+      {% if trip.status == 'accepted' %}
+        <p class="muted">
+          🚗 <strong>Navigate to pickup location</strong><br>
+          Real-time route shown with pickup (orange marker) and destination (red marker).<br>
+          Blue car icon shows your simulated position heading to pickup.
+        </p>
+      {% elif trip.status == 'in_progress' %}
+        <p class="muted">
+          🚛 <strong>En route to destination</strong><br>
+          Route visualization updated. Green route line indicates active trip.<br>
+          Blue car icon shows your simulated position heading to destination.
+        </p>
+      {% elif trip.status == 'completed' %}
+        <p class="muted">
+          ✅ <strong>Trip completed</strong><br>
+          Route shown in gray. Both locations marked with green completion icons.
+        </p>
+      {% else %}
+        <p class="muted">
+          📍 Interactive route map with pickup and destination markers.<br>
+          Enhanced with real coordinate data and route visualization.
+        </p>
+      {% endif %}
+    </div>
   </section>
 
   <form method="POST" action="{{ url_for('driver_home.trip_progress', trip_id=trip.id) }}" style="margin-top:1rem;">
     <div class="actions">
-      <button type="submit" name="action" value="start"
-              {% if trip.status not in ['accepted','requested'] %}disabled{% endif %}>
-        Start Trip
-      </button>
-      <button type="submit" name="action" value="arrived"
-              {% if trip.status != 'to_pickup' %}disabled{% endif %}>
-        Arrived at pickup
-      </button>
-      <button type="submit" name="action" value="end"
-              {% if trip.status != 'to_destination' %}disabled{% endif %}>
-        End Trip
-      </button>
+      {% if trip.status == 'accepted' %}
+        <button type="submit" name="action" value="start" class="primary">
+          🚗 Start Journey to Pickup
+        </button>
+      {% elif trip.status == 'in_progress' %}
+        <button type="submit" name="action" value="complete" class="primary">
+          ✅ Complete Trip (Arrived at Destination)
+        </button>
+      {% elif trip.status == 'completed' %}
+        <a role="button" href="{{ url_for('driver_home.home') }}" class="secondary">
+          ← Back to Driver Home
+        </a>
+      {% else %}
+        <button type="submit" name="action" value="start"
+                {% if trip.status not in ['accepted','requested'] %}disabled{% endif %}>
+          Start Trip
+        </button>
+        <button type="submit" name="action" value="complete"
+                {% if trip.status not in ['accepted','in_progress'] %}disabled{% endif %}>
+          Complete Trip
+        </button>
+      {% endif %}
     </div>
-    <p class="muted" style="margin-top:.5rem;">
-      Current status: {{ status_label }}
-    </p>
+    
+    <div style="margin-top:.75rem; padding:.75rem; background-color: #f8f9fa; border-radius: 6px; border-left: 4px solid #007bff;">
+      {% if trip.status == 'accepted' %}
+        <strong>Next Step:</strong> Navigate to pickup location and start the trip
+      {% elif trip.status == 'in_progress' %}
+        <strong>Next Step:</strong> Navigate to destination and complete the trip
+      {% elif trip.status == 'completed' %}
+        <strong>Status:</strong> Trip completed successfully! 🎉
+      {% else %}
+        <strong>Current status:</strong> {{ status_label }}
+      {% endif %}
+    </div>
   </form>
 {% endif %}
 """
@@ -589,7 +773,15 @@ def trip_progress(trip_id):
 
         status_label = TRIP_STATUS_LABELS.get(trip["status"], trip["status"].title())
     
-    fmap_html = make_driver_map()
+    # Create enhanced driver map with trip route and status
+    if trip:
+        fmap_html = make_driver_map(
+            trip_pickup=trip["pickup"],
+            trip_destination=trip["destination"],
+            trip_status=trip["status"]
+        )
+    else:
+        fmap_html = make_driver_map()
 
     body = render_template_string(
         TRIP_PROGRESS_BODY,
