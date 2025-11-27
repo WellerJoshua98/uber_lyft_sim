@@ -174,11 +174,11 @@ def get_all_riders():
         return cur.fetchall()
 
 def get_active_trip_for_rider(user_id: int):
-    """Check if a rider has any active trips (requested, accepted, in_progress)"""
+    """Get full active trip data for a rider (requested, accepted, in_progress)"""
     with connect() as con:
         cur = con.cursor()
         cur.execute(
-            "SELECT id, state FROM trips WHERE user_id = ? AND state IN ('requested', 'accepted', 'in_progress') ORDER BY created_at DESC LIMIT 1",
+            "SELECT id, created_at, pickup, destination, strategy, fare, state, distance, user_id, driver_id FROM trips WHERE user_id = ? AND state IN ('requested', 'accepted', 'in_progress') ORDER BY created_at DESC LIMIT 1",
             (user_id,)
         )
         return cur.fetchone()
