@@ -6,13 +6,6 @@ import requests
 from typing import Optional, Tuple, Dict, List
 import os
 
-# Try to load .env file if available
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # dotenv not available, use regular environment variables
-
 
 class MapService:
     """

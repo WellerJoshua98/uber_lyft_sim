@@ -10,6 +10,23 @@ from map_integration import MapService, MockMapService
 
 rider_home = Blueprint("rider_home", __name__)
 
+# Status label mapping for UI - consistent with driver_home
+TRIP_STATUS_LABELS = {
+    "requested": "Requested",
+    "accepted": "Accepted", 
+    "in_progress": "In Progress",
+    "completed": "Completed",
+    "declined": "Declined",
+    "cancelled": "Cancelled",
+    # Handle enum case variations
+    "In_Progress": "In Progress",
+    "IN_PROGRESS": "In Progress",
+}
+
+def get_status_label(status):
+    """Get user-friendly status label"""
+    return TRIP_STATUS_LABELS.get(status, status.title() if status else "Unknown")
+
 # Initialize map service (use Mock if no API key available)
 try:
     map_service = MapService()
@@ -355,7 +372,7 @@ HOME_BODY = """
                                 {% if selected_rider and selected_rider.id == rider.id %}selected{% endif %}>
                             {{ rider.name }} (★{{ "%.1f"|format(rider.rating) }})
                             {% if not rider.available %}
-                                - ON TRIP ({{ rider.active_trip_status }})
+                                - ON TRIP ({{ get_status_label(rider.active_trip_status) }})
                             {% endif %}
                         </option>
                     {% endfor %}
@@ -399,7 +416,7 @@ HOME_BODY = """
                 <span style="color: #666;">(★{{ "%.1f"|format(selected_rider.rating) }}, Member since {{ selected_rider.created_at[:10] }})</span>
                 {% if not selected_rider.available %}
                     <div style="color: #856404; margin-top: 0.5rem;">
-                        🚗 <strong>Currently on trip ({{ selected_rider.active_trip_status }})</strong>
+                        🚗 <strong>Currently on trip ({{ get_status_label(selected_rider.active_trip_status) }})</strong>
                         <br>Manage current trip below or select a different rider to request a new trip.
                     </div>
                 {% endif %}
@@ -416,7 +433,7 @@ HOME_BODY = """
             <div style="background: #f8f9fa; padding: 1rem; border-radius: 6px; margin-bottom: 1rem;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
                     <strong>Trip #{{ selected_rider.active_trip_id }}</strong>
-                    <span class="pill" style="background: #007bff; color: white;">{{ selected_rider.active_trip_status.title() }}</span>
+                    <span class="pill" style="background: #007bff; color: white;">{{ get_status_label(selected_rider.active_trip_status) }}</span>
                 </div>
                 
                 <p style="margin: 0.25rem 0;"><strong>Pickup:</strong> {{ selected_rider.active_trip[2] }}</p>
@@ -900,7 +917,7 @@ def home():
                 return redirect(url_for("rider_home.home"))
             
             if not selected_rider["available"]:
-                flash(f"Cannot request trip: {selected_rider['name']} has an active trip ({selected_rider['active_trip_status']}).", "error")
+                flash(f"Cannot request trip: {selected_rider['name']} has an active trip ({get_status_label(selected_rider['active_trip_status'])}).", "error")
                 return redirect(url_for("rider_home.home"))
             
             # Create rider object for the selected rider
@@ -937,7 +954,8 @@ def home():
         strategy_descriptions=strategy_descriptions,
         available_riders=available_riders,
         selected_rider=selected_rider,
-        fmap=fmap_html
+        fmap=fmap_html,
+        get_status_label=get_status_label
     )
 
     return render_template_string(BASE_HTML, body=body)

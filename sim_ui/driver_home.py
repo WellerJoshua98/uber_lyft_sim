@@ -252,8 +252,11 @@ def get_pending_trip_requests():
         # Create rider object from trip data (look up actual user)
         rider = create_rider_from_trip_data(row)
         
+        # Normalize strategy name to match FareStrategyFactory (capitalize first letter)
+        strategy_name = trip_data["strategy"].strip().capitalize()
+        
         # Recreate Trip object for OOP functionality
-        trip_obj = Trip(trip_data["pickup"], trip_data["destination"], rider, trip_data["strategy"])
+        trip_obj = Trip(trip_data["pickup"], trip_data["destination"], rider, strategy_name)
         trip_obj.trip_id = trip_data["id"]  # Use database ID
         trip_obj.set_route_info(float(trip_data["distance"]), 10.0)  # Mock duration
         
@@ -326,6 +329,9 @@ TRIP_STATUS_LABELS = {
     # Legacy mappings for backward compatibility
     "to_pickup": "To Pickup",
     "to_destination": "To Destination",
+    # Handle enum case variations
+    "In_Progress": "In Progress",
+    "IN_PROGRESS": "In Progress",
 }
 
 BASE_HTML = """
@@ -387,12 +393,15 @@ HOME_BODY = """
   {% if drivers %}
     <form method="POST" action="{{ url_for('driver_home.home') }}" style="margin-bottom: 1rem;">
       <fieldset>
-        <label for="driver_selection">Choose an available driver:</label>
+        <label for="driver_selection">Choose a driver to view their status:</label>
+        <small style="color: #666; display: block; margin-bottom: 0.5rem;">
+          📌 Available drivers can review new trip requests<br>
+          🚗 Busy drivers will show their current trip progress
+        </small>
         <select name="selected_driver_id" id="driver_selection" required>
           <option value="">-- Select a Driver --</option>
           {% for driver in drivers %}
             <option value="{{ driver.id }}" 
-                    {% if not driver.is_available %}disabled{% endif %}
                     {% if selected_driver and selected_driver.id == driver.id %}selected{% endif %}>
               {{ driver.name }} ({{ driver.vehicle_type or 'No Vehicle' }} - {{ driver.license_plate or 'No Plate' }}, Rating: {{ driver.rating }}) - {{ driver.status }}
             </option>
@@ -544,19 +553,31 @@ TRIP_PROGRESS_BODY = """
       <span class="pill">{{ status_label }}</span>
     </header>
 
-    <div class="stepper">
-      <span class="step {% if trip.status in ['accepted','in_progress','completed'] %}active{% endif %}">
-        Trip Accepted
-      </span>
-      <span class="step {% if trip.status in ['in_progress','completed'] %}active{% endif %}">
-        In Progress
-      </span>
-      <span class="step {% if trip.status == 'completed' %}active{% endif %}">
-        Completed
-      </span>
-    </div>
-
     <p class="muted" style="margin-top:.5rem;">Trip ID: {{ trip.id }} · Fare: ${{ '%.2f'|format(trip.fare) }}</p>
+    
+    <!-- Driver and Rider Information -->
+    <div style="margin-top:1rem; display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+      <div style="padding: 0.75rem; background-color: #e8f4fd; border-radius: 6px; border-left: 4px solid #007bff;">
+        <h4 style="margin: 0 0 0.5rem 0; color: #007bff;">🚗 Driver</h4>
+        {% if driver_info %}
+          <p style="margin: 0.25rem 0;"><strong>{{ driver_info.name }}</strong></p>
+          <p style="margin: 0.25rem 0; font-size: 0.9rem;">Rating: ⭐ {{ driver_info.rating }}</p>
+          <p style="margin: 0.25rem 0; font-size: 0.9rem;">{{ driver_info.vehicle_type }} - {{ driver_info.license_plate }}</p>
+        {% else %}
+          <p style="margin: 0; color: #6c757d;">Not assigned</p>
+        {% endif %}
+      </div>
+      
+      <div style="padding: 0.75rem; background-color: #fff3cd; border-radius: 6px; border-left: 4px solid #ffc107;">
+        <h4 style="margin: 0 0 0.5rem 0; color: #856404;">👤 Rider</h4>
+        {% if rider_info %}
+          <p style="margin: 0.25rem 0;"><strong>{{ rider_info.name }}</strong></p>
+          <p style="margin: 0.25rem 0; font-size: 0.9rem;">Rating: ⭐ {{ rider_info.rating }}</p>
+        {% else %}
+          <p style="margin: 0; color: #6c757d;">Unknown rider</p>
+        {% endif %}
+      </div>
+    </div>
   </section>
 
   <section class="card" style="margin-top:1rem;">
@@ -635,8 +656,8 @@ def home():
     banner = None
     selected_driver = None
     
-    # Get driver selection from session or form
-    if request.method == "POST":
+    # Only process form data on actual POST requests with form data
+    if request.method == "POST" and request.form:
         action = request.form.get("action", "").strip()
         
         # Handle driver selection
@@ -645,6 +666,14 @@ def home():
             if selected_driver_id and selected_driver_id.isdigit():
                 driver_record = db.get_user_by_id(int(selected_driver_id))
                 if driver_record:
+                    active_trip = db.get_active_trip_for_driver(driver_record[0])
+                    is_available = active_trip is None
+                    
+                    # If driver is busy, redirect to their trip progress page
+                    if not is_available and active_trip:
+                        flash(f"Viewing active trip for driver: {driver_record[1]}")
+                        return redirect(url_for('driver_home.trip_progress', trip_id=active_trip[0]))
+                    
                     selected_driver = {
                         'id': driver_record[0],
                         'name': driver_record[1],
@@ -653,8 +682,8 @@ def home():
                         'created_at': driver_record[4],
                         'vehicle_type': driver_record[5] if len(driver_record) > 5 else None,
                         'license_plate': driver_record[6] if len(driver_record) > 6 else None,
-                        'is_available': db.get_active_trip_for_driver(driver_record[0]) is None,
-                        'status': 'Available' if db.get_active_trip_for_driver(driver_record[0]) is None else 'Busy'
+                        'is_available': is_available,
+                        'status': 'Available' if is_available else 'Busy'
                     }
                     flash(f"Selected driver: {selected_driver['name']}")
                 else:
@@ -737,6 +766,8 @@ def trip_progress(trip_id):
     if row is None:
         trip = None
         status_label = ""
+        driver_info = None
+        rider_info = None
     else:
         # Create Trip object for OOP state management with proper rider lookup
         rider = create_rider_from_trip_data(row)
@@ -745,6 +776,33 @@ def trip_progress(trip_id):
         
         # Set current state based on database
         current_state = row[6] if len(row) > 6 else "requested"
+        
+        # Get driver and rider information
+        driver_id = row[9] if len(row) > 9 else None  # driver_id from trips table
+        rider_id = row[8] if len(row) > 8 else None   # user_id from trips table
+        
+        driver_info = None
+        rider_info = None
+        
+        if driver_id:
+            driver_record = db.get_user_by_id(driver_id)
+            if driver_record:
+                driver_info = {
+                    'id': driver_record[0],
+                    'name': driver_record[1],
+                    'rating': driver_record[2],
+                    'vehicle_type': driver_record[5] if len(driver_record) > 5 else 'Unknown',
+                    'license_plate': driver_record[6] if len(driver_record) > 6 else 'N/A'
+                }
+        
+        if rider_id:
+            rider_record = db.get_user_by_id(rider_id)
+            if rider_record:
+                rider_info = {
+                    'id': rider_record[0],
+                    'name': rider_record[1],
+                    'rating': rider_record[2]
+                }
         
         trip = {
             "id": row[0],
@@ -788,6 +846,8 @@ def trip_progress(trip_id):
         trip=trip,
         status_label=status_label,
         fmap=fmap_html,
+        driver_info=driver_info,
+        rider_info=rider_info,
     )
     return render_template_string(BASE_HTML, body=body)
 
