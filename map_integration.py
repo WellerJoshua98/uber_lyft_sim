@@ -27,43 +27,107 @@ class MapService:
         
         self.base_url = "https://api.openrouteservice.org"
         self.headers = {
-            "Authorization": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+    def get_route(
+        self,
+        start_coords: Tuple[float, float],
+        end_coords: Tuple[float, float],
+        profile: str = "driving-car"
+    ) -> Optional[Dict]:
+
+        url = f"{self.base_url}/v2/directions/{profile}"
+
+        # ORS requires [lon, lat]
+        coordinates = [
+            [start_coords[1], start_coords[0]],
+            [end_coords[1], end_coords[0]]
+        ]
+
+        body = {
+            "coordinates": coordinates,
+            "instructions": True
+        }
+
+        try:
+            # IMPORTANT: correct header (no 'Bearer')
+            response = requests.post(
+                url,
+                json=body,
+                headers={"Authorization": self.api_key},
+                timeout=15
+            )
+
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get("routes"):
+                return None
+
+            route = data["routes"][0]
+            summary = route["summary"]
+            steps = route.get("segments", [{}])[0].get("steps", [])
+
+            # Get total distance in meters
+            total_distance_m = sum(step.get("distance", 0) for step in steps)
+
+            if total_distance_m == 0:
+                total_distance_m = summary["distance"]
+
+            # Convert meters → km
+            distance_km = total_distance_m / 1000.0
+            duration_min = summary["duration"] / 60.0
+
+            return {
+                "distance_km": distance_km,
+                "duration_min": duration_min,
+                "geometry": route.get("geometry"),
+                "bbox": route.get("bbox"),
+                "steps": steps
+            }
+
+        except Exception as e:
+            print(f"Routing error: {e}")
+            return None
+
     
     def geocode(self, address: str) -> Optional[Tuple[float, float]]:
         """
-        Convert an address to coordinates (latitude, longitude).
-        
-        Args:
-            address: Address string to geocode
-            
-        Returns:
-            Tuple of (latitude, longitude) or None if geocoding fails
+        Stable geocoder: sorts by confidence to avoid random ORS results.
         """
         url = f"{self.base_url}/geocode/search"
         params = {
             "api_key": self.api_key,
             "text": address,
-            "size": 1  # Get only the best match
+            "size": 5,           # request multiple matches
+            "boundary.country": "US",  # optional: restrict to US
         }
-        
+
         try:
             response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             data = response.json()
-            
-            if data.get("features") and len(data["features"]) > 0:
-                coords = data["features"][0]["geometry"]["coordinates"]
-                # OpenRouteService returns [longitude, latitude]
-                return (coords[1], coords[0])
-            
-            return None
-        
+
+            features = data.get("features", [])
+            if not features:
+                return None
+
+            # Sort by ORS confidence score (higher = better)
+            features.sort(
+                key=lambda f: f["properties"].get("confidence", 0),
+                reverse=True
+            )
+
+            # Take the most confident result
+            best = features[0]
+            coords = best["geometry"]["coordinates"]
+            return (coords[1], coords[0])
+
         except requests.exceptions.RequestException as e:
             print(f"Geocoding error: {e}")
             return None
-    
+
     def reverse_geocode(self, lat: float, lon: float) -> Optional[str]:
         """
         Convert coordinates to an address.
@@ -96,51 +160,7 @@ class MapService:
         except requests.exceptions.RequestException as e:
             print(f"Reverse geocoding error: {e}")
             return None
-    
-    def get_route(self, start_coords: Tuple[float, float], 
-                  end_coords: Tuple[float, float],
-                  profile: str = "driving-car") -> Optional[Dict]:
-        """
-        Calculate route between two coordinates.
-        
-        Args:
-            start_coords: (latitude, longitude) of start point
-            end_coords: (latitude, longitude) of end point
-            profile: Routing profile (driving-car, cycling-regular, foot-walking)
-            
-        Returns:
-            Dict with route information or None if routing fails
-        """
-        url = f"{self.base_url}/v2/directions/{profile}"
-        
-        # OpenRouteService expects [longitude, latitude]
-        coordinates = [
-            [start_coords[1], start_coords[0]],
-            [end_coords[1], end_coords[0]]
-        ]
-        
-        body = {
-            "coordinates": coordinates,
-            "instructions": True,
-            "units": "km"
-        }
-        
-        try:
-            response = requests.post(url, json=body, headers=self.headers, timeout=15)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get("routes") and len(data["routes"]) > 0:
-                route = data["routes"][0]
-                summary = route["summary"]
-                
-                return {
-                    "distance_km": summary["distance"] / 1000,  # Convert meters to km
-                    "duration_min": summary["duration"] / 60,   # Convert seconds to minutes
-                    "geometry": route.get("geometry"),
-                    "bbox": route.get("bbox"),
-                    "steps": route.get("segments", [{}])[0].get("steps", [])
-                }
+   
             
             return None
         

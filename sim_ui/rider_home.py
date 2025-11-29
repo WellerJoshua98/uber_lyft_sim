@@ -6,7 +6,34 @@ import db
 from trip_management import Trip
 from user_classes import Rider, Driver, TripState
 from fare_calc import FareStrategyFactory
+# Right - imports the classes and creates an instance
 from map_integration import MapService, MockMapService
+import os
+
+# Create an instance of the map service
+try:
+    if os.getenv("ORS_API_KEY"):
+        map_service = MapService()
+    else:
+        map_service = MockMapService() 
+except Exception as e:
+    print(f"Failed to initialize map service: {e}")
+    map_service = MockMapService()  # Fallback instance
+
+
+# Right - imports the classes and creates an instance
+from map_integration import MapService, MockMapService
+import os
+
+# Create an instance of the map service
+try:
+    if os.getenv("ORS_API_KEY"):
+        map_service = MapService()
+    else:
+        map_service = MockMapService() 
+except Exception as e:
+    print(f"Failed to initialize map service: {e}")
+    map_service = MockMapService()  # Fallback instance
 
 rider_home = Blueprint("rider_home", __name__)
 
@@ -88,7 +115,7 @@ def get_strategy_descriptions() -> dict:
             strategy_obj = FareStrategyFactory.create_strategy(strategy_name)
             strategies[strategy_name] = {
                 "description": strategy_obj.get_description(),
-                "details": ""  # Could add more detailed breakdown if needed
+                "details": "" 
             }
     except Exception as e:
         print(f"Error getting strategy descriptions: {e}")
@@ -210,36 +237,51 @@ def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
         }
 
 def estimate_distance(pickup: str, destination: str) -> float:
-    """Estimate distance using map service, with fallback"""
+    """Calculate distance using map service API"""
     try:
-        route_info = map_service.calculate_trip_route(pickup, destination)
-        if route_info:
-            return route_info["distance_km"]
+        print(f"DEBUG: Calculating distance from '{pickup}' to '{destination}'")
+        route_info = map_service.calculate_trip_route(
+            pickup_address=pickup, 
+            destination_address=destination
+        )
+        print(f"DEBUG: Route info received: {route_info}")
+        if route_info and 'distance_km' in route_info:
+            distance = float(route_info['distance_km'])
+            print(f"DEBUG: Distance calculated: {distance} km")
+            return distance
+        else:
+            print("DEBUG: Route info missing or invalid")
     except Exception as e:
-        print(f"Map service error in estimate_distance: {e}")
+        print(f"Error getting distance: {e}")
+        import traceback
+        traceback.print_exc()
     
-    # Fallback to simple estimation
-    return estimate_distance(pickup, destination)
-
-def estimate_eta(pickup: str, destination: str) -> float:
-    """Estimate ETA using map service, with fallback"""
-    try:
-        route_info = map_service.calculate_trip_route(pickup, destination)
-        if route_info:
-            return route_info["duration_min"]
-    except Exception as e:
-        print(f"Map service error in estimate_eta: {e}")
-    
-    # Fallback to simple estimation
-    return estimate_eta(pickup, destination)
-
-def estimate_distance(pickup: str, destination: str) -> float:
-    # Stub function: In real app, calculate based on addresses
+    # Fallback to default if API fails
+    print("DEBUG: Using fallback distance of 5.0 km")
     return 5.0
 
 def estimate_eta(pickup: str, destination: str) -> float:
-    # Stub function: In real app, calculate based on addresses  
-    # Return float for compatibility with Trip class
+    """Calculate duration using map service API"""
+    try:
+        print(f"DEBUG: Calculating ETA from '{pickup}' to '{destination}'")
+        route_info = map_service.calculate_trip_route(
+            pickup_address=pickup, 
+            destination_address=destination
+        )
+        print(f"DEBUG: Route info received: {route_info}")
+        if route_info and 'duration_min' in route_info:
+            duration = float(route_info['duration_min'])
+            print(f"DEBUG: Duration calculated: {duration} min")
+            return duration
+        else:
+            print("DEBUG: Route info missing or invalid")
+    except Exception as e:
+        print(f"Error getting duration: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Fallback to default if API fails
+    print("DEBUG: Using fallback duration of 10.0 min")
     return 10.0
 
 def create_trip_with_objects(pickup: str, destination: str, strategy: str, rider: Optional["Rider"] = None) -> Trip:
