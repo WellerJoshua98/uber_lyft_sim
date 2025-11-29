@@ -50,7 +50,7 @@ class SurgeFareStrategy(FareStrategy):
     PER_KM_RATE = 1.50
     PER_MINUTE_RATE = 0.30
     MIN_FARE = 5.00
-    SURGE_MULTIPLIER = 1.8  # 80% increase
+    SURGE_MULTIPLIER = 1.3  # 80% increase
     
     def calculate_fare(self, distance_km: float, duration_min: float) -> float:
         """Calculate surge fare with multiplier"""
