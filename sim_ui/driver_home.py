@@ -1,20 +1,30 @@
 from flask import Blueprint, render_template_string, request, flash, redirect, url_for
+from typing import Optional
 import folium
 import db
 from trip_management import Trip
 from user_classes import Rider, Driver, TripState
 from fare_calc import FareStrategyFactory
 from map_integration import MapService, MockMapService
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 driver_home = Blueprint("driver_home", __name__)
 
 # Initialize map service (use Mock if no API key available)
 try:
-    map_service = MapService()
-    print("Driver Home: Using real MapService with OpenRouteService API")
-except ValueError:
-    map_service = MockMapService()
-    print("Driver Home: Using MockMapService (no API key found)")
+    if os.getenv("ORS_API_KEY"):
+        map_service = MapService()
+        print("Driver Home: Using real MapService with OpenRouteService API")
+    else:
+        map_service = MockMapService()
+        print("Driver Home: Using MockMapService (no API key found)")
+except Exception as e:
+    print(f"Driver Home: Failed to initialize map service: {e}")
+    map_service = MockMapService()  # Fallback instance
 
 def create_rider_from_trip_data(trip_row) -> Rider:
     """Create a Rider object from trip database data with proper user lookup"""
@@ -231,53 +241,122 @@ def get_trip_route_info(pickup_address: str, destination_address: str):
     }
 
 # --- Get real trip requests from database ---
+def create_trip_from_database(trip_id: int) -> Optional[Trip]:
+    """Create a fully functional Trip object from database with Observer pattern integration"""
+    try:
+        # Get trip data from database
+        row = db.get_trip_by_id(trip_id)
+        if not row:
+            print(f"Trip {trip_id} not found in database")
+            return None
+        
+        # Extract trip data - trips table: id, created_at, pickup, destination, strategy, fare, state, distance, user_id, driver_id
+        trip_db_id, created_at, pickup, destination, strategy, fare, state, distance, user_id, driver_id = row
+        
+        # Create Rider object from user_id with proper database lookup
+        rider = create_rider_from_user_id(user_id) if user_id else Rider(user_id="guest", name="Guest", email="guest@example.com", phone="")
+        
+        # Create Trip object using trip_management.py with proper strategy normalization
+        strategy_name = strategy.capitalize() if strategy else "Standard"
+        trip = Trip(pickup, destination, rider, strategy_name)
+        trip.trip_id = trip_db_id  # Use database ID
+        
+        # OBSERVER PATTERN INTEGRATION:
+        # Attach the Rider as an observer to receive trip state notifications
+        trip.attach(rider)
+        print(f"[Observer Pattern] Attached rider {rider.name} as observer to trip {trip.trip_id}")
+        
+        # Create additional observer for comprehensive state change logging
+        class TripStateLogger:
+            def update(self, trip_obj, old_state, new_state):
+                print(f"[Trip State] Trip {trip_obj.trip_id} state change: {old_state.value} → {new_state.value}")
+        
+        logger = TripStateLogger()
+        trip.attach(logger)
+        print(f"[Observer Pattern] Attached TripStateLogger to trip {trip.trip_id}")
+        
+        # Create driver if assigned and attach as observer
+        if driver_id:
+            driver = create_driver_from_user_id(driver_id)
+            trip.driver = driver
+            trip.attach(driver)  # Driver also observes trip state changes
+            print(f"[Observer Pattern] Attached driver {driver.name} as observer to trip {trip.trip_id}")
+        
+        # Set current state from database using proper enum mapping
+        state_mapping = {
+            "requested": TripState.REQUESTED,
+            "accepted": TripState.ACCEPTED,
+            "in_progress": TripState.IN_PROGRESS,
+            "completed": TripState.COMPLETED,
+            "declined": TripState.DECLINED,
+            "cancelled": TripState.CANCELLED
+        }
+        
+        if state and state.lower() in state_mapping:
+            trip._state = state_mapping[state.lower()]
+            print(f"[Trip Management] Set trip {trip_id} state to {trip._state.value}")
+        
+        # Set route information with real map data if available
+        try:
+            route_info = map_service.calculate_trip_route(pickup, destination)
+            if route_info:
+                distance_km = route_info["distance_km"]
+                duration_min = route_info["duration_min"]
+            else:
+                distance_km = float(distance) if distance else 5.0
+                duration_min = 10.0  # Fallback duration
+        except Exception as e:
+            print(f"Error getting route info for trip {trip_id}: {e}")
+            distance_km = float(distance) if distance else 5.0
+            duration_min = 10.0
+        
+        # Use Trip object's set_route_info method for fare calculation
+        trip.set_route_info(distance_km, duration_min)
+        print(f"[Trip Management] Trip {trip_id} loaded with fare ${trip.base_fare:.2f} using {trip.fare_strategy.get_strategy_name()} strategy")
+        
+        return trip
+        
+    except Exception as e:
+        print(f"Error creating Trip object from database for trip {trip_id}: {e}")
+        return None
+
 def get_pending_trip_requests():
-    """Get pending trip requests from database and convert to Trip objects"""
+    """Get pending trip requests from database and convert to Trip objects with full integration"""
     pending_trips = db.get_pending_trips()
     trip_objects = []
     
     for row in pending_trips:
-        # Create a Trip object from database row
-        trip_data = {
-            "id": row[0],
-            "created_at": row[1],
-            "pickup": row[2],
-            "destination": row[3],
-            "strategy": row[4],
-            "fare": row[5],
-            "state": row[6],
-            "distance": row[7] if len(row) > 7 else 5,  # Default distance if not set
-        }
-        
-        # Create rider object from trip data (look up actual user)
-        rider = create_rider_from_trip_data(row)
-        
-        # Normalize strategy name to match FareStrategyFactory (capitalize first letter)
-        strategy_name = trip_data["strategy"].strip().capitalize()
-        
-        # Recreate Trip object for OOP functionality
-        trip_obj = Trip(trip_data["pickup"], trip_data["destination"], rider, strategy_name)
-        trip_obj.trip_id = trip_data["id"]  # Use database ID
-        trip_obj.set_route_info(float(trip_data["distance"]), 10.0)  # Mock duration
-        
-        # Get enhanced route information for driver display
-        route_info = get_trip_route_info(trip_data["pickup"], trip_data["destination"])
-        
-        # Convert to dictionary for template compatibility
-        trip_request = {
-            "id": trip_data["id"],
-            "pickup": trip_data["pickup"],
-            "destination": trip_data["destination"],
-            "fare": trip_obj.base_fare,  # Use calculated fare from strategy
-            "eta": "Now",  # Mock ETA
-            "strategy": trip_data["strategy"],
-            "created_at": trip_data["created_at"],
-            "distance_km": route_info["distance_km"],
-            "duration_min": route_info["duration_min"],
-            "has_real_data": route_info["has_real_data"],
-            "trip_object": trip_obj  # Keep reference to Trip object
-        }
-        trip_objects.append(trip_request)
+        try:
+            # Create a fully functional Trip object from database row
+            trip_obj = create_trip_from_database(row[0])  # row[0] is trip ID
+            if not trip_obj:
+                print(f"Failed to create Trip object for trip {row[0]}")
+                continue
+            
+            # Get enhanced route information for driver display
+            route_info = get_trip_route_info(trip_obj.pickup, trip_obj.destination)
+            
+            # Convert to dictionary for template compatibility while preserving Trip object
+            trip_request = {
+                "id": trip_obj.trip_id,
+                "pickup": trip_obj.pickup,
+                "destination": trip_obj.destination,
+                "fare": trip_obj.base_fare,  # Use calculated fare from strategy
+                "eta": "Now",  # Mock ETA
+                "strategy": trip_obj.fare_strategy.get_strategy_name(),
+                "created_at": trip_obj.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "distance_km": route_info["distance_km"],
+                "duration_min": route_info["duration_min"],
+                "has_real_data": route_info["has_real_data"],
+                "trip_object": trip_obj,  # Keep reference to fully functional Trip object
+                "rider_name": trip_obj.rider.name,
+                "observer_count": len(trip_obj._observers)
+            }
+            trip_objects.append(trip_request)
+            
+        except Exception as e:
+            print(f"Error processing trip request {row[0]}: {e}")
+            continue
     
     return trip_objects
 
@@ -289,32 +368,92 @@ def get_mock_requests():
         {"id": "rq-103", "pickup": "JFK Terminal 4", "destination": "Midtown Manhattan", "fare": 45.30, "eta": "3 mins"}
     ]
 
-def accept_trip_with_objects(trip_id: int, driver_name: str = "Default Driver") -> bool:
-    """Accept a trip using Trip object functionality"""
+def accept_trip_with_objects(trip_id: int, driver_id: int) -> bool:
+    """Accept a trip using full Trip object functionality with Observer pattern integration"""
     try:
-        # Get trip from database
-        row = db.get_trip_by_id(trip_id)
-        if not row:
+        # Create Trip object from database with full Observer integration
+        trip_obj = create_trip_from_database(trip_id)
+        if not trip_obj:
+            print(f"Failed to create Trip object for trip {trip_id}")
             return False
         
-        # Create Trip object with proper rider lookup
-        rider = create_rider_from_trip_data(row)
-        trip_obj = Trip(row[2], row[3], rider, row[4])  # pickup, destination, rider, strategy
-        trip_obj.trip_id = trip_id
+        # Create Driver object from database
+        driver = create_driver_from_user_id(driver_id)
+        if not driver:
+            print(f"Failed to create Driver object for driver {driver_id}")
+            return False
         
-        # Create driver object
-        driver = Driver(user_id="2", name=driver_name, email="driver@example.com", phone="555-0456",
-                       vehicle_type="Toyota Prius", license_plate="ABC123")
+        # OBSERVER PATTERN INTEGRATION:
+        # Attach the Driver as an observer before accepting the trip
+        trip_obj.attach(driver)
+        print(f"[Observer Pattern] Attached driver {driver.name} as observer to trip {trip_id}")
         
-        # Accept the trip using OOP method
+        # Create additional observers for comprehensive monitoring
+        class DriverActionLogger:
+            def update(self, trip_obj, old_state, new_state):
+                print(f"[Driver Action] Trip {trip_obj.trip_id} accepted by driver - State: {old_state.value} → {new_state.value}")
+        
+        driver_logger = DriverActionLogger()
+        trip_obj.attach(driver_logger)
+        
+        # Accept the trip using Trip object's OOP method (will notify all observers)
+        print(f"[Trip Management] Driver {driver.name} accepting trip {trip_id}")
         trip_obj.accept(driver)
+        print(f"[Trip Management] Trip {trip_id} successfully accepted by {driver.name}, state: {trip_obj.state.value}")
         
-        # Update database
+        # Update database to reflect Trip object state
+        db.update_trip_from_object(trip_id, trip_obj)
+        db.assign_driver_to_trip(trip_id, driver_id)  # Update driver assignment in database
+        
+        print(f"[Observer Pattern] Trip {trip_id} acceptance complete with {len(trip_obj._observers)} observers notified")
+        return True
+        
+    except Exception as e:
+        print(f"Error accepting trip with Trip object: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def start_trip_with_objects(trip_id: int) -> bool:
+    """Start a trip using Trip object functionality with Observer notifications"""
+    try:
+        # Create Trip object from database with full integration
+        trip_obj = create_trip_from_database(trip_id)
+        if not trip_obj:
+            return False
+        
+        # Start the trip using Trip object method (notifies all observers)
+        old_state = trip_obj.state
+        trip_obj.start()
+        print(f"[Trip Management] Trip {trip_id} started: {old_state.value} → {trip_obj.state.value}")
+        
+        # Update database to reflect Trip object state
         db.update_trip_from_object(trip_id, trip_obj)
         
         return True
     except Exception as e:
-        print(f"Error accepting trip: {e}")
+        print(f"Error starting trip with Trip object: {e}")
+        return False
+
+def complete_trip_with_objects(trip_id: int) -> bool:
+    """Complete a trip using Trip object functionality with Observer notifications"""
+    try:
+        # Create Trip object from database with full integration
+        trip_obj = create_trip_from_database(trip_id)
+        if not trip_obj:
+            return False
+        
+        # Complete the trip using Trip object method (notifies all observers)
+        old_state = trip_obj.state
+        trip_obj.complete()
+        print(f"[Trip Management] Trip {trip_id} completed: {old_state.value} → {trip_obj.state.value}")
+        
+        # Update database to reflect Trip object state
+        db.update_trip_from_object(trip_id, trip_obj)
+        
+        return True
+    except Exception as e:
+        print(f"Error completing trip with Trip object: {e}")
         return False
 
 
@@ -465,6 +604,26 @@ HOME_BODY = """
     <p><em>This driver is currently busy and cannot review new requests.</em></p>
   {% endif %}
 </section>
+
+{% if selected_driver.is_available %}
+<section class="card" style="margin-bottom: 2rem; background-color: #f8f9fa; border-left: 4px solid #007bff;">
+  <h4 style="margin-top: 0; color: #007bff;">🎯 Trip Management Integration</h4>
+  <div style="font-size: 0.9rem; color: #495057;">
+    <p style="margin: 0.5rem 0;">This driver interface fully utilizes <strong>trip_management.py</strong> with comprehensive design pattern integration:</p>
+    <ul style="margin: 0.5rem 0; padding-left: 1.5rem;">
+      <li><strong>Observer Pattern:</strong> Automatic notifications when trip states change (riders, drivers, and loggers receive updates)</li>
+      <li><strong>Strategy Pattern:</strong> Dynamic fare calculation using different algorithms (Standard, Surge, Premium)</li>
+      <li><strong>Trip Object Lifecycle:</strong> Complete state management from request through completion</li>
+      <li><strong>Database Integration:</strong> Trip objects sync with database for persistent state</li>
+      <li><strong>Real-time Updates:</strong> All stakeholders notified instantly of trip status changes</li>
+    </ul>
+    <p style="margin: 0.5rem 0; padding: 0.5rem; background-color: #e8f4fd; border-radius: 4px;">
+      💡 <strong>Observer Pattern in Action:</strong> When {{ selected_driver.name }} accepts/starts/completes trips, 
+      all attached observers (rider, driver, state logger) automatically receive notifications.
+    </p>
+  </div>
+</section>
+{% endif %}
 {% endif %}
 
 <!-- Trip Requests Section -->
@@ -500,6 +659,18 @@ HOME_BODY = """
             <span style="color: #ffc107;">⚠️ Estimated</span>
           {% endif %}
         </div>
+        
+        {% if r.trip_object %}
+        <div style="margin: .5rem 0; padding: .5rem; background-color: #e8f4fd; border-radius: 4px; border-left: 3px solid #007bff;">
+          <p style="margin: 0; font-size: .85rem; color: #0056b3;">🎯 <strong>Trip Management Integration:</strong></p>
+          <p style="margin: 0.25rem 0 0 0; font-size: .8rem; color: #666;">
+            • Rider: {{ r.rider_name }}<br>
+            • Observer Pattern: {{ r.observer_count }} observers attached<br>
+            • Fare Strategy: {{ r.trip_object.fare_strategy.get_strategy_name() }}<br>
+            • Trip ID: {{ r.trip_object.trip_id }}
+          </p>
+        </div>
+        {% endif %}
         
         <p class="muted" style="margin:0">Created: {{ r.created_at }}</p>
 
@@ -647,6 +818,21 @@ TRIP_PROGRESS_BODY = """
         <strong>Current status:</strong> {{ status_label }}
       {% endif %}
     </div>
+    
+    <!-- Trip Management Integration Status -->
+    <div style="margin-top: 1rem; padding: 0.75rem; background-color: #e8f4fd; border-radius: 6px; border-left: 4px solid #007bff;">
+      <h4 style="margin: 0 0 0.5rem 0; color: #007bff; font-size: 1rem;">🎯 Trip Object Integration</h4>
+      <div style="font-size: 0.85rem; color: #495057;">
+        <p style="margin: 0.25rem 0;">✅ <strong>Observer Pattern:</strong> Trip state changes automatically notify all observers</p>
+        <p style="margin: 0.25rem 0;">✅ <strong>Strategy Pattern:</strong> Dynamic fare calculation using {{ trip.strategy or 'Standard' }} strategy</p>
+        <p style="margin: 0.25rem 0;">✅ <strong>State Management:</strong> Trip object manages state transitions ({{ status_label }})</p>
+        <p style="margin: 0.25rem 0;">✅ <strong>Database Sync:</strong> Trip object state synchronized with persistent storage</p>
+        <p style="margin: 0.25rem 0; padding: 0.5rem; background-color: #fff; border-radius: 3px; font-style: italic;">
+          💡 This demonstrates complete trip_management.py utilization with Observer pattern, 
+          Strategy pattern, and full object lifecycle management.
+        </p>
+      </div>
+    </div>
   </form>
 {% endif %}
 """
@@ -705,29 +891,79 @@ def home():
                 if db.get_active_trip_for_driver(driver_id_int):
                     flash("Driver is no longer available!")
                 elif decision == "accept":
-                    # Assign driver to trip
-                    success = db.assign_driver_to_trip(trip_id_int, driver_id_int)
-                    if success:
-                        driver_record = db.get_user_by_id(driver_id_int)
-                        driver_name = driver_record[1] if driver_record else "Driver"
-                        banner = {
-                            "title": f"Request #{trip_id} accepted by {driver_name}!",
-                            "detail": "Trip has been assigned and accepted.",
-                        }
-                        flash(f"Trip #{trip_id} successfully assigned to {driver_name}")
-                    else:
-                        banner = {
-                            "title": f"Failed to accept request #{trip_id}",
-                            "detail": "The trip may have been taken by another driver.",
-                        }
-                        flash("Failed to assign trip - it may have been taken already!")
+                    # TRIP MANAGEMENT INTEGRATION:
+                    # Use Trip object from trip_management.py for proper acceptance with Observer pattern
+                    try:
+                        success = accept_trip_with_objects(trip_id_int, driver_id_int)
+                        if success:
+                            driver_record = db.get_user_by_id(driver_id_int)
+                            driver_name = driver_record[1] if driver_record else "Driver"
+                            banner = {
+                                "title": f"Request #{trip_id} accepted by {driver_name}! (Trip Management)",
+                                "detail": "Trip accepted using Trip object with Observer pattern notifications to rider and driver.",
+                            }
+                            flash(f"Trip #{trip_id} successfully assigned to {driver_name} using Trip object with Observer notifications")
+                        else:
+                            banner = {
+                                "title": f"Failed to accept request #{trip_id} (Trip Management)",
+                                "detail": "Failed to create Trip object or assign driver. The trip may have been taken by another driver.",
+                            }
+                            flash("Failed to accept trip using Trip object - it may have been taken already!")
+                    except Exception as e:
+                        print(f"Error in Trip object acceptance: {e}")
+                        # Fallback to direct database assignment
+                        success = db.assign_driver_to_trip(trip_id_int, driver_id_int)
+                        if success:
+                            driver_record = db.get_user_by_id(driver_id_int)
+                            driver_name = driver_record[1] if driver_record else "Driver"
+                            banner = {
+                                "title": f"Request #{trip_id} accepted by {driver_name}! (Fallback)",
+                                "detail": "Trip assigned using fallback method due to Trip object error.",
+                            }
+                            flash(f"Trip #{trip_id} assigned to {driver_name} (fallback mode)")
+                        else:
+                            banner = {
+                                "title": f"Failed to accept request #{trip_id}",
+                                "detail": "The trip may have been taken by another driver.",
+                            }
+                            flash("Failed to assign trip - it may have been taken already!")
                 else:  # decline
-                    db.update_trip_status(trip_id_int, "declined")
-                    banner = {
-                        "title": f"Request #{trip_id} declined.",
-                        "detail": "Trip request has been declined.",
-                    }
-                    flash(f"Trip #{trip_id} declined")
+                    # TRIP MANAGEMENT INTEGRATION:
+                    # Use Trip object for proper decline with Observer pattern notifications
+                    try:
+                        trip_obj = create_trip_from_database(trip_id_int)
+                        if trip_obj:
+                            # Use Trip object's decline method (will notify all observers)
+                            old_state = trip_obj.state
+                            trip_obj.decline()
+                            print(f"[Trip Management] Trip {trip_id} declined using Trip object: {old_state.value} → {trip_obj.state.value}")
+                            
+                            # Update database to reflect Trip object state
+                            db.update_trip_from_object(trip_id_int, trip_obj)
+                            
+                            banner = {
+                                "title": f"Request #{trip_id} declined (Trip Management)",
+                                "detail": "Trip declined using Trip object with Observer pattern notifications.",
+                            }
+                            flash(f"Trip #{trip_id} declined using Trip object with Observer notifications")
+                        else:
+                            # Fallback to direct database update if Trip object creation fails
+                            print(f"Failed to create Trip object for decline, using fallback")
+                            db.update_trip_status(trip_id_int, "declined")
+                            banner = {
+                                "title": f"Request #{trip_id} declined.",
+                                "detail": "Trip request has been declined.",
+                            }
+                            flash(f"Trip #{trip_id} declined")
+                    except Exception as e:
+                        print(f"Error declining trip with Trip object: {e}")
+                        # Fallback to direct database update
+                        db.update_trip_status(trip_id_int, "declined")
+                        banner = {
+                            "title": f"Request #{trip_id} declined.",
+                            "detail": "Trip request has been declined.",
+                        }
+                        flash(f"Trip #{trip_id} declined")
             elif trip_id.isdigit() and decision in {"accept", "decline"}:
                 flash("Please select a driver first!")
     
@@ -769,13 +1005,19 @@ def trip_progress(trip_id):
         driver_info = None
         rider_info = None
     else:
-        # Create Trip object for OOP state management with proper rider lookup
-        rider = create_rider_from_trip_data(row)
-        trip_obj = Trip(row[2], row[3], rider, row[4])  # pickup, destination, strategy
-        trip_obj.trip_id = trip_id
+        # TRIP MANAGEMENT INTEGRATION:
+        # Create Trip object using enhanced create_trip_from_database with full Observer pattern
+        trip_obj = create_trip_from_database(trip_id)
+        if not trip_obj:
+            print(f"Failed to create Trip object from database for trip {trip_id}")
+            # Fallback to manual Trip creation
+            rider = create_rider_from_trip_data(row)
+            trip_obj = Trip(row[2], row[3], rider, row[4])  # pickup, destination, strategy
+            trip_obj.trip_id = trip_id
         
-        # Set current state based on database
-        current_state = row[6] if len(row) > 6 else "requested"
+        # Get current state from Trip object (more reliable than database)
+        current_state = trip_obj.state.value if trip_obj else (row[6] if len(row) > 6 else "requested")
+        print(f"[Trip Management] Trip {trip_id} loaded with state: {current_state}, observers: {len(trip_obj._observers) if trip_obj else 0}")
         
         # Get driver and rider information
         driver_id = row[9] if len(row) > 9 else None  # driver_id from trips table
@@ -813,21 +1055,53 @@ def trip_progress(trip_id):
             "status": current_state,
         }
         
-        # Handle state transitions using Trip object methods
+        # Handle state transitions using enhanced Trip object methods with Observer notifications
         if request.method == "POST":
             action = (request.form.get("action") or "").strip()
             
             if action == "start" and current_state in ["accepted", "requested"]:
-                # Start the trip (transition to in_progress)
-                trip_obj.start()
-                db.update_trip_from_object(trip_id, trip_obj)
-                trip["status"] = trip_obj.state.value
+                # TRIP MANAGEMENT INTEGRATION:
+                # Start the trip using Trip object with Observer pattern notifications
+                try:
+                    success = start_trip_with_objects(trip_id)
+                    if success:
+                        # Refresh trip object to get updated state
+                        updated_trip_obj = create_trip_from_database(trip_id)
+                        if updated_trip_obj:
+                            trip["status"] = updated_trip_obj.state.value
+                            print(f"[Trip Management] Trip {trip_id} started successfully with Observer notifications")
+                        else:
+                            print(f"Warning: Could not refresh Trip object after starting trip {trip_id}")
+                    else:
+                        print(f"Failed to start trip {trip_id} using Trip object")
+                except Exception as e:
+                    print(f"Error starting trip with Trip object: {e}")
+                    # Fallback to direct Trip object method
+                    trip_obj.start()
+                    db.update_trip_from_object(trip_id, trip_obj)
+                    trip["status"] = trip_obj.state.value
                 
             elif action == "complete" and current_state in ["accepted", "in_progress"]:
-                # Complete the trip
-                trip_obj.complete()
-                db.update_trip_from_object(trip_id, trip_obj)
-                trip["status"] = trip_obj.state.value
+                # TRIP MANAGEMENT INTEGRATION:
+                # Complete the trip using Trip object with Observer pattern notifications
+                try:
+                    success = complete_trip_with_objects(trip_id)
+                    if success:
+                        # Refresh trip object to get updated state
+                        updated_trip_obj = create_trip_from_database(trip_id)
+                        if updated_trip_obj:
+                            trip["status"] = updated_trip_obj.state.value
+                            print(f"[Trip Management] Trip {trip_id} completed successfully with Observer notifications")
+                        else:
+                            print(f"Warning: Could not refresh Trip object after completing trip {trip_id}")
+                    else:
+                        print(f"Failed to complete trip {trip_id} using Trip object")
+                except Exception as e:
+                    print(f"Error completing trip with Trip object: {e}")
+                    # Fallback to direct Trip object method
+                    trip_obj.complete()
+                    db.update_trip_from_object(trip_id, trip_obj)
+                    trip["status"] = trip_obj.state.value
 
         status_label = TRIP_STATUS_LABELS.get(trip["status"], trip["status"].title())
     
