@@ -51,30 +51,6 @@ Run `python trip_manager_dashboard.py` or open the Jupyter notebook to generate:
 - Revenue by strategy analysis
 - Interactive trip map
 
-### Programmatic API
-```python
-from trip_manager_dashboard import TripController
-from fare_calc import FareStrategyFactory
-from fare_decorators import TipDecorator, DiscountDecorator
-
-ctl = TripController()
-ctl.new_rider(name="Alice", rating="4.9")
-ctl.new_driver(name="Bob", vehicle_type="Tesla Model 3")
-
-# Create trip with Premium pricing
-team_id, db_id = ctl.create_trip(
-    pickup="34.101,-118.326",
-    destination="33.941,-118.408",
-    rider_name="Alice",
-    strategy="Premium"
-)
-
-# Apply decorators for dynamic fare modification
-base_strategy = FareStrategyFactory.create_strategy("Standard")
-with_tip = TipDecorator(base_strategy, tip_percentage=20)
-fare = with_tip.calculate_fare(distance_km=10, duration_min=15)
-```
-
 ## Project Structure
 ```
 uber_lyft_sim/
