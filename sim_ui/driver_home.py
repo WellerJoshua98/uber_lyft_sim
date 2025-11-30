@@ -7,6 +7,8 @@ from user_classes import Rider, Driver, TripState
 from fare_calc import FareStrategyFactory
 from map_integration import MapService, MockMapService
 import os
+import time
+from functools import lru_cache
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -25,6 +27,12 @@ try:
 except Exception as e:
     print(f"Driver Home: Failed to initialize map service: {e}")
     map_service = MockMapService()  # Fallback instance
+
+def invalidate_caches():
+    """Invalidate all caches when data changes"""
+    global _driver_cache_time, _trip_cache_time
+    _driver_cache_time = 0
+    _trip_cache_time = 0
 
 def create_rider_from_trip_data(trip_row) -> Rider:
     """Create a Rider object from trip database data with proper user lookup"""
@@ -92,47 +100,70 @@ def create_driver_from_user_id(user_id: int) -> Driver:
                  email="guest@example.com", phone="", vehicle_type="Unknown Vehicle", 
                  license_plate="UNKNOWN")
 
+# Cache for expensive driver queries (cache for 30 seconds)
+_driver_cache = {}
+_driver_cache_time = 0
+_CACHE_TIMEOUT = 30  # seconds
+
 def get_available_drivers_with_status():
-    """Get all drivers and their availability status"""
-    drivers = db.get_all_drivers()
-    driver_list = []
+    """Get all drivers and their availability status with caching"""
+    global _driver_cache, _driver_cache_time
     
-    for driver_row in drivers:
-        # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
-        driver_id, name, rating, role, created_at, vehicle_type, license_plate = driver_row
-        
-        # Check if driver has any active trips
-        active_trip = db.get_active_trip_for_driver(driver_id)
-        is_available = active_trip is None
-        
-        driver_info = {
-            'id': driver_id,
-            'name': name,
-            'rating': rating,
-            'created_at': created_at,
-            'vehicle_type': vehicle_type,
-            'license_plate': license_plate,
-            'is_available': is_available,
-            'status': 'Available' if is_available else f'Busy (Trip #{active_trip[0]})' if active_trip else 'Available'
-        }
-        driver_list.append(driver_info)
+    # Check if cache is still valid
+    current_time = time.time()
+    if current_time - _driver_cache_time < _CACHE_TIMEOUT and _driver_cache:
+        return _driver_cache.get('drivers', [])
     
-    return driver_list
+    try:
+        drivers = db.get_all_drivers()
+        driver_list = []
+        
+        for driver_row in drivers:
+            # users table layout: id, name, rating, role, created_at, vehicle_type, license_plate
+            driver_id, name, rating, role, created_at, vehicle_type, license_plate = driver_row
+            
+            # Check if driver has any active trips
+            active_trip = db.get_active_trip_for_driver(driver_id)
+            is_available = active_trip is None
+            
+            driver_info = {
+                'id': driver_id,
+                'name': name,
+                'rating': rating,
+                'created_at': created_at,
+                'vehicle_type': vehicle_type,
+                'license_plate': license_plate,
+                'is_available': is_available,
+                'status': 'Available' if is_available else f'Busy (Trip #{active_trip[0]})' if active_trip else 'Available'
+            }
+            driver_list.append(driver_info)
+        
+        # Update cache
+        _driver_cache = {'drivers': driver_list}
+        _driver_cache_time = current_time
+        
+        return driver_list
+        
+    except Exception as e:
+        print(f"Error getting drivers: {e}")
+        return _driver_cache.get('drivers', [])
 
 # --------- Enhanced Map helper for driver view ---------
+@lru_cache(maxsize=32)
 def make_driver_map(trip_pickup=None, trip_destination=None, driver_location=None, trip_status="requested"):
-    """Enhanced driver map with trip route and driver position simulation"""
+    """Enhanced driver map with trip route and driver position simulation - cached for performance"""
     # Default center (NYC)
     center_lat, center_lon = 40.758, -73.9855
     
-    # Try to get real coordinates if addresses are provided
+    # Try to get real coordinates if addresses are provided (but cache the results)
     pickup_coords = None
     dest_coords = None
     
     if trip_pickup and trip_destination:
         try:
-            route_info = map_service.calculate_trip_route(trip_pickup, trip_destination)
-            if route_info:
+            # Use cached route info to avoid repeated API calls
+            route_info = get_trip_route_info(trip_pickup, trip_destination)
+            if route_info and route_info["pickup_coords"] and route_info["destination_coords"]:
                 pickup_coords = route_info["pickup_coords"]
                 dest_coords = route_info["destination_coords"]
                 # Center map between pickup and destination
@@ -216,8 +247,9 @@ def make_driver_map(trip_pickup=None, trip_destination=None, driver_location=Non
     
     return fmap._repr_html_()
 
+@lru_cache(maxsize=128)
 def get_trip_route_info(pickup_address: str, destination_address: str):
-    """Get route information for a trip to enhance driver navigation"""
+    """Get route information for a trip to enhance driver navigation with caching"""
     try:
         route_info = map_service.calculate_trip_route(pickup_address, destination_address)
         if route_info:
@@ -320,45 +352,83 @@ def create_trip_from_database(trip_id: int) -> Optional[Trip]:
         print(f"Error creating Trip object from database for trip {trip_id}: {e}")
         return None
 
+# Cache for trip requests (cache for 10 seconds for more real-time updates)
+_trip_cache = {}
+_trip_cache_time = 0
+_TRIP_CACHE_TIMEOUT = 10  # seconds
+
 def get_pending_trip_requests():
-    """Get pending trip requests from database and convert to Trip objects with full integration"""
-    pending_trips = db.get_pending_trips()
-    trip_objects = []
+    """Get pending trip requests with lightweight processing and caching"""
+    global _trip_cache, _trip_cache_time
     
-    for row in pending_trips:
-        try:
-            # Create a fully functional Trip object from database row
-            trip_obj = create_trip_from_database(row[0])  # row[0] is trip ID
-            if not trip_obj:
-                print(f"Failed to create Trip object for trip {row[0]}")
+    # Check cache first
+    current_time = time.time()
+    if current_time - _trip_cache_time < _TRIP_CACHE_TIMEOUT and _trip_cache:
+        return _trip_cache.get('trips', [])
+    
+    try:
+        pending_trips = db.get_pending_trips()
+        trip_objects = []
+        
+        for row in pending_trips:
+            try:
+                # Use lightweight processing - only create full Trip object if needed
+                trip_id, created_at, pickup, destination, strategy, fare, state, distance, user_id, driver_id = row
+                
+                # Get rider name efficiently without creating full Trip object
+                rider_name = "Unknown Rider"
+                if user_id:
+                    try:
+                        user_record = db.get_user_by_id(user_id)
+                        if user_record:
+                            rider_name = user_record[1]  # name field
+                    except:
+                        pass
+                
+                # Use cached route info or provide defaults to avoid API calls
+                route_info = {
+                    "distance_km": float(distance) if distance else 5.0,
+                    "duration_min": (float(distance) * 2) if distance else 10.0,  # Rough estimate
+                    "has_real_data": bool(distance)
+                }
+                
+                # Create lightweight trip request without heavy Trip object creation
+                trip_request = {
+                    "id": trip_id,
+                    "pickup": pickup,
+                    "destination": destination,
+                    "fare": float(fare) if fare else 10.0,
+                    "eta": "Now",
+                    "strategy": strategy or "Standard",
+                    "created_at": created_at,
+                    "distance_km": route_info["distance_km"],
+                    "duration_min": route_info["duration_min"],
+                    "has_real_data": route_info["has_real_data"],
+                    "trip_object": None,  # Load Trip object only when accepting
+                    "rider_name": rider_name,
+                    "observer_count": 0  # Will be set when Trip object is created
+                }
+                trip_objects.append(trip_request)
+                
+            except Exception as e:
+                print(f"Error processing trip request {row[0] if row else 'unknown'}: {e}")
                 continue
-            
-            # Get enhanced route information for driver display
-            route_info = get_trip_route_info(trip_obj.pickup, trip_obj.destination)
-            
-            # Convert to dictionary for template compatibility while preserving Trip object
-            trip_request = {
-                "id": trip_obj.trip_id,
-                "pickup": trip_obj.pickup,
-                "destination": trip_obj.destination,
-                "fare": trip_obj.base_fare,  # Use calculated fare from strategy
-                "eta": "Now",  # Mock ETA
-                "strategy": trip_obj.fare_strategy.get_strategy_name(),
-                "created_at": trip_obj.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                "distance_km": route_info["distance_km"],
-                "duration_min": route_info["duration_min"],
-                "has_real_data": route_info["has_real_data"],
-                "trip_object": trip_obj,  # Keep reference to fully functional Trip object
-                "rider_name": trip_obj.rider.name,
-                "observer_count": len(trip_obj._observers)
-            }
-            trip_objects.append(trip_request)
-            
-        except Exception as e:
-            print(f"Error processing trip request {row[0]}: {e}")
-            continue
-    
-    return trip_objects
+        
+        # Update cache
+        _trip_cache = {'trips': trip_objects}
+        _trip_cache_time = current_time
+        
+        return trip_objects
+        
+    except Exception as e:
+        print(f"Error getting pending trips: {e}")
+        return _trip_cache.get('trips', [])
+
+def invalidate_caches():
+    """Invalidate all caches when data changes"""
+    global _driver_cache_time, _trip_cache_time
+    _driver_cache_time = 0
+    _trip_cache_time = 0
 
 def get_mock_requests():
     """Keep original mock function for fallback"""
@@ -635,10 +705,14 @@ HOME_BODY = """
       <li><strong>Trip Object Lifecycle:</strong> Complete state management from request through completion</li>
       <li><strong>Database Integration:</strong> Trip objects sync with database for persistent state</li>
       <li><strong>Real-time Updates:</strong> All stakeholders notified instantly of trip status changes</li>
+      <li><strong>Performance Optimized:</strong> Caching and lazy loading for faster page loads ⚡</li>
     </ul>
     <p style="margin: 0.5rem 0; padding: 0.5rem; background-color: #e8f4fd; border-radius: 4px;">
       💡 <strong>Observer Pattern in Action:</strong> When {{ selected_driver.name }} accepts/starts/completes trips, 
       all attached observers (rider, driver, state logger) automatically receive notifications.
+    </p>
+    <p style="margin: 0.5rem 0; padding: 0.5rem; background-color: #d4edda; border-radius: 4px; color: #155724;">
+      ⚡ <strong>Performance:</strong> Driver data cached for 30s, trip data cached for 10s, route calculations cached for faster loading.
     </p>
   </div>
 </section>
@@ -910,6 +984,9 @@ def home():
                 if db.get_active_trip_for_driver(driver_id_int):
                     flash("Driver is no longer available!")
                 elif decision == "accept":
+                    # Invalidate caches when data changes
+                    invalidate_caches()
+                    
                     # TRIP MANAGEMENT INTEGRATION:
                     # Use Trip object from trip_management.py for proper acceptance with Observer pattern
                     try:
@@ -947,6 +1024,9 @@ def home():
                             }
                             flash("Failed to assign trip - it may have been taken already!")
                 else:  # decline
+                    # Invalidate caches on data change
+                    invalidate_caches()
+                    
                     # TRIP MANAGEMENT INTEGRATION:
                     # Use Trip object for proper decline with Observer pattern notifications
                     try:
