@@ -7,6 +7,23 @@ from trip_management import Trip
 from user_classes import Rider, Driver, TripState
 from fare_calc import FareStrategyFactory
 from map_integration import MapService, MockMapService
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Create an instance of the map service
+try:
+    if os.getenv("ORS_API_KEY"):
+        map_service = MapService()
+        print("Using real MapService with OpenRouteService API")
+    else:
+        map_service = MockMapService()
+        print("Using MockMapService (no API key found)")
+except Exception as e:
+    print(f"Failed to initialize map service: {e}")
+    map_service = MockMapService()  # Fallback instance
 
 rider_home = Blueprint("rider_home", __name__)
 
@@ -27,13 +44,7 @@ def get_status_label(status):
     """Get user-friendly status label"""
     return TRIP_STATUS_LABELS.get(status, status.title() if status else "Unknown")
 
-# Initialize map service (use Mock if no API key available)
-try:
-    map_service = MapService()
-    print("Using real MapService with OpenRouteService API")
-except ValueError:
-    map_service = MockMapService()
-    print("Using MockMapService (no API key found)")
+# Map service already initialized above
 
 def make_map(pickup_coords=None, dest_coords=None):
     """Enhanced map generation with route visualization"""
@@ -88,7 +99,7 @@ def get_strategy_descriptions() -> dict:
             strategy_obj = FareStrategyFactory.create_strategy(strategy_name)
             strategies[strategy_name] = {
                 "description": strategy_obj.get_description(),
-                "details": ""  # Could add more detailed breakdown if needed
+                "details": "" 
             }
     except Exception as e:
         print(f"Error getting strategy descriptions: {e}")
@@ -210,46 +221,62 @@ def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
         }
 
 def estimate_distance(pickup: str, destination: str) -> float:
-    """Estimate distance using map service, with fallback"""
+    """Calculate distance using map service API"""
     try:
-        route_info = map_service.calculate_trip_route(pickup, destination)
-        if route_info:
-            return route_info["distance_km"]
+        print(f"DEBUG: Calculating distance from '{pickup}' to '{destination}'")
+        route_info = map_service.calculate_trip_route(
+            pickup_address=pickup, 
+            destination_address=destination
+        )
+        print(f"DEBUG: Route info received: {route_info}")
+        if route_info and 'distance_km' in route_info:
+            distance = float(route_info['distance_km'])
+            print(f"DEBUG: Distance calculated: {distance} km")
+            return distance
+        else:
+            print("DEBUG: Route info missing or invalid")
     except Exception as e:
-        print(f"Map service error in estimate_distance: {e}")
+        print(f"Error getting distance: {e}")
+        import traceback
+        traceback.print_exc()
     
-    # Fallback to simple estimation
-    return estimate_distance(pickup, destination)
-
-def estimate_eta(pickup: str, destination: str) -> float:
-    """Estimate ETA using map service, with fallback"""
-    try:
-        route_info = map_service.calculate_trip_route(pickup, destination)
-        if route_info:
-            return route_info["duration_min"]
-    except Exception as e:
-        print(f"Map service error in estimate_eta: {e}")
-    
-    # Fallback to simple estimation
-    return estimate_eta(pickup, destination)
-
-def estimate_distance(pickup: str, destination: str) -> float:
-    # Stub function: In real app, calculate based on addresses
+    # Fallback to default if API fails
+    print("DEBUG: Using fallback distance of 5.0 km")
     return 5.0
 
 def estimate_eta(pickup: str, destination: str) -> float:
-    # Stub function: In real app, calculate based on addresses  
-    # Return float for compatibility with Trip class
+    """Calculate duration using map service API"""
+    try:
+        print(f"DEBUG: Calculating ETA from '{pickup}' to '{destination}'")
+        route_info = map_service.calculate_trip_route(
+            pickup_address=pickup, 
+            destination_address=destination
+        )
+        print(f"DEBUG: Route info received: {route_info}")
+        if route_info and 'duration_min' in route_info:
+            duration = float(route_info['duration_min'])
+            print(f"DEBUG: Duration calculated: {duration} min")
+            return duration
+        else:
+            print("DEBUG: Route info missing or invalid")
+    except Exception as e:
+        print(f"Error getting duration: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Fallback to default if API fails
+    print("DEBUG: Using fallback duration of 10.0 min")
     return 10.0
 
 def create_trip_with_objects(pickup: str, destination: str, strategy: str, rider: Optional["Rider"] = None) -> Trip:
-  """Create a Trip object with proper OOP pattern integration.
+  """Create a Trip object with full trip_management.py integration including Observer pattern.
 
   Notes:
   - If a Rider instance is provided, it will be used.
   - If no Rider is provided, this function will try to build one from the Flask
     session (key: 'user_id') or fall back to a lightweight guest Rider.
-  - Avoids hard-coding a specific user id so the code is suitable for real apps.
+  - Fully utilizes Trip class from trip_management.py with Observer pattern.
+  - Leverages Trip object state management and fare calculation.
   """
   # If caller didn't pass a Rider, try to resolve from session / DB, otherwise use a guest
   if rider is None:
@@ -283,8 +310,21 @@ def create_trip_with_objects(pickup: str, destination: str, strategy: str, rider
       # No user_id in session - create guest rider
       rider = Rider(user_id="guest", name="Guest", email="guest@example.com", phone="")
 
-  # Create trip object
+  # Create trip object using Trip class from trip_management.py
   trip = Trip(pickup, destination, rider, strategy)
+  
+  # OBSERVER PATTERN INTEGRATION:
+  # Attach the Rider as an observer to the Trip so they receive state change notifications
+  trip.attach(rider)
+  print(f"[Observer Pattern] Attached rider {rider.name} as observer to trip {trip.trip_id}")
+  
+  # Create additional observer for logging state changes
+  class TripStateLogger:
+    def update(self, trip_obj, old_state, new_state):
+      print(f"[Trip State] Trip {trip_obj.trip_id} transitioned: {old_state.value} → {new_state.value}")
+  
+  logger = TripStateLogger()
+  trip.attach(logger)
 
   # Set route info using map service for more accurate data
   try:
@@ -301,9 +341,61 @@ def create_trip_with_objects(pickup: str, destination: str, strategy: str, rider
     distance = estimate_distance(pickup, destination)
     duration = estimate_eta(pickup, destination)
   
+  # Use Trip object's set_route_info method to calculate fare using Strategy pattern
   trip.set_route_info(distance, duration)
+  print(f"[Trip Management] Trip {trip.trip_id} created with fare ${trip.base_fare:.2f} using {trip.fare_strategy.get_strategy_name()} strategy")
 
   return trip
+
+def create_trip_from_database(trip_id: int) -> Optional[Trip]:
+    """Create a Trip object from database data with full trip_management.py integration"""
+    try:
+        # Get trip data from database
+        row = db.get_trip_by_id(trip_id)
+        if not row:
+            print(f"Trip {trip_id} not found in database")
+            return None
+        
+        # Extract trip data
+        # trips table: id, created_at, pickup, destination, strategy, fare, state, distance, user_id, driver_id
+        trip_db_id, created_at, pickup, destination, strategy, fare, state, distance, user_id, driver_id = row
+        
+        # Create Rider object from user_id
+        rider = create_rider_from_user_id(user_id) if user_id else Rider(user_id="guest", name="Guest", email="guest@example.com", phone="")
+        
+        # Create Trip object using trip_management.py
+        trip = Trip(pickup, destination, rider, strategy)
+        trip.trip_id = trip_db_id  # Use database ID
+        
+        # Set up Observer pattern
+        trip.attach(rider)
+        
+        # Set current state from database
+        state_mapping = {
+            "requested": TripState.REQUESTED,
+            "accepted": TripState.ACCEPTED,
+            "in_progress": TripState.IN_PROGRESS,
+            "completed": TripState.COMPLETED,
+            "declined": TripState.DECLINED,
+            "cancelled": TripState.CANCELLED
+        }
+        
+        if state in state_mapping:
+            trip._state = state_mapping[state]
+        
+        # Set route information if available
+        if distance and isinstance(distance, (int, float)):
+            # Calculate duration from distance (rough estimate)
+            duration = distance * 2  # Rough estimate: 2 minutes per km
+            trip.set_route_info(float(distance), duration)
+        
+        print(f"[Trip Management] Reconstructed Trip {trip.trip_id} from database with state {trip.state.value}")
+        
+        return trip
+        
+    except Exception as e:
+        print(f"Error creating Trip object from database for trip {trip_id}: {e}")
+        return None
 
 def get_driver_for_trip(tripId:int):
     return db.get_driver_for_trip(tripId)
@@ -553,7 +645,7 @@ PREVIEW_BODY = """
 
   <hr>
 
-  <p style="margin:.25rem 0;"><strong>Estimated ETA:</strong> {{ eta_min }} minutes</p>
+  <p style="margin:.25rem 0;"><strong>Estimated ETA:</strong> {{ "%.1f"|format(eta_min) }} minutes</p>
   <p style="margin:.25rem 0;"><strong>Estimated Distance:</strong> {{ "%.1f"|format(distance_km) }} km</p>
   <p style="margin:.25rem 0;"><strong>Strategy Description:</strong> {{ strategy_description }}</p>
   
@@ -893,17 +985,24 @@ def home():
             return render_template_string(BASE_HTML, body=body)
             
         elif action == "confirm":
-            # Confirm from Trip Preview page: validate rider and create trip
+            # Confirm from Trip Preview page: validate rider and create trip using full Trip object integration
             if not selected_rider or not selected_rider["available"]:
                 flash("Cannot create trip: rider not available.", "error")
                 return redirect(url_for("rider_home.home"))
                 
-            # Create rider object for the selected rider
+            # Create rider object and Trip object with full trip_management.py integration
             rider = create_rider_from_user_id(selected_rider_id)
             trip_obj = create_trip_with_objects(pickup, destination, strategy, rider)
-            # Save to database with rider ID
-            db.create_trip(pickup, destination, strategy, trip_obj.base_fare, selected_rider_id)
-            flash(f"Trip successfully requested for {selected_rider['name']}!", "success")
+            
+            # Save to database using Trip object properties
+            trip_id = db.create_trip(pickup, destination, strategy, trip_obj.base_fare, selected_rider_id)
+            
+            # Store Trip object ID mapping for future reference
+            if trip_id:
+                trip_obj.trip_id = trip_id
+                print(f"[Trip Management] Created trip {trip_id} with Trip object {trip_obj.trip_id}, state: {trip_obj.state.value}")
+            
+            flash(f"Trip successfully requested for {selected_rider['name']} using Trip object (${trip_obj.base_fare:.2f})!", "success")
             return redirect(url_for("rider_home.past_trips"))
             
         elif action == "cancel":
@@ -920,12 +1019,20 @@ def home():
                 flash(f"Cannot request trip: {selected_rider['name']} has an active trip ({get_status_label(selected_rider['active_trip_status'])}).", "error")
                 return redirect(url_for("rider_home.home"))
             
-            # Create rider object for the selected rider
+            # Create rider object and Trip object with full trip_management.py integration
             rider = create_rider_from_user_id(selected_rider_id)
             trip_obj = create_trip_with_objects(pickup, destination, strategy, rider)
-            # Save to database with rider ID
-            db.create_trip(pickup, destination, strategy, trip_obj.base_fare, selected_rider_id)
-            flash(f"Trip successfully requested for {selected_rider['name']}!", "success")
+            
+            # Save to database using Trip object properties and state
+            trip_id = db.create_trip(pickup, destination, strategy, trip_obj.base_fare, selected_rider_id)
+            
+            # Update Trip object with database ID
+            if trip_id:
+                trip_obj.trip_id = trip_id
+                print(f"[Trip Management] Direct request: Created trip {trip_id} with Trip object, initial state: {trip_obj.state.value}")
+                print(f"[Trip Management] Trip details: {trip_obj}")
+            
+            flash(f"Trip successfully requested for {selected_rider['name']} using Trip object (${trip_obj.base_fare:.2f}, {trip_obj.fare_strategy.get_strategy_name()})!", "success")
             return redirect(url_for("rider_home.past_trips"))
     
     # Get available strategies from FareStrategyFactory
@@ -1221,13 +1328,52 @@ def live_trip(trip_id):
                     "detail": "This is a demo. In a real app, this would open in-app chat or call.",
                 }
             elif action == "cancel" and trip["state"] not in ["completed", "cancelled"]:
-                db.update_trip_status(trip_id, "cancelled")
-                trip["state"] = "cancelled"
-                trip["status_label"] = status_map["cancelled"]
-                banner = {
-                    "title": "Trip Cancelled",
-                    "detail": "Your trip has been cancelled.",
-                }
+                # TRIP MANAGEMENT INTEGRATION:
+                # Use Trip object from trip_management.py for proper state management
+                try:
+                    trip_obj = create_trip_from_database(trip_id)
+                    if trip_obj:
+                        # Trip object handles state change and notifies observers
+                        old_state = trip_obj.state
+                        
+                        # Create a cancellation state transition (Trip class doesn't have cancel method)
+                        # So we'll use _change_state directly to go to CANCELLED
+                        trip_obj._change_state(TripState.CANCELLED)
+                        
+                        print(f"[Trip Management] Trip {trip_id} cancelled using Trip object: {old_state.value} → {trip_obj.state.value}")
+                        
+                        # Update database to reflect Trip object state
+                        db.update_trip_status(trip_id, "cancelled")
+                        trip["state"] = "cancelled"
+                        trip["status_label"] = status_map["cancelled"]
+                        
+                        banner = {
+                            "title": "Trip Cancelled (Trip Management)",
+                            "detail": "Trip cancelled using Trip object state management with Observer notifications.",
+                        }
+                    else:
+                        # Fallback to direct database update if Trip object creation fails
+                        print(f"Failed to create Trip object for cancellation, using fallback")
+                        db.update_trip_status(trip_id, "cancelled")
+                        trip["state"] = "cancelled"
+                        trip["status_label"] = status_map["cancelled"]
+                        
+                        banner = {
+                            "title": "Trip Cancelled",
+                            "detail": "Your trip has been cancelled.",
+                        }
+                        
+                except Exception as e:
+                    print(f"Error using Trip object for cancellation: {e}")
+                    # Fallback to direct database update
+                    db.update_trip_status(trip_id, "cancelled")
+                    trip["state"] = "cancelled"
+                    trip["status_label"] = status_map["cancelled"]
+                    
+                    banner = {
+                        "title": "Trip Cancelled",
+                        "detail": "Your trip has been cancelled.",
+                    }
         
         # Try to get route coordinates for enhanced map display
         pickup_coords = None
@@ -1340,11 +1486,14 @@ def advanced_trip():
         </form>
         
         <p class="muted" style="margin-top:1rem;">
-            This demonstrates:<br>
-            • Strategy pattern for fare calculation<br>
-            • Observer pattern for state change notifications<br>
-            • Proper OOP encapsulation<br>
-            • Integration with database layer
+            This demonstrates comprehensive <strong>trip_management.py</strong> integration:<br>
+            • <strong>Observer Pattern:</strong> Riders, drivers, and analytics automatically receive notifications when trip state changes<br>
+            • <strong>Strategy Pattern:</strong> Different fare calculation algorithms (Standard, Surge, Premium) using FareStrategy classes<br>
+            • <strong>State Management:</strong> Trip objects manage their own state using TripState enum with proper transitions<br>
+            • <strong>Database Synchronization:</strong> Trip objects sync seamlessly with database while maintaining object state<br>
+            • <strong>Premium Demo:</strong> Premium trips show complete lifecycle: REQUESTED → ACCEPTED → IN_PROGRESS<br>
+            • <strong>Fare Calculation:</strong> Automatic fare calculation using distance, duration, and strategy pattern<br>
+            • <strong>Observer Logging:</strong> Real-time console output shows Observer pattern and Trip object interactions
         </p>
     </section>
     """
@@ -1354,7 +1503,8 @@ def advanced_trip():
 
 @rider_home.route("/trip-details/<int:trip_id>")
 def trip_details(trip_id):
-    """Show detailed trip information with OOP integration"""
+    """Show detailed trip information with comprehensive Trip object integration from trip_management.py"""
+    # Get database record
     row = db.get_trip_by_id(trip_id)
     if not row:
         return "Trip not found", 404
@@ -1370,46 +1520,98 @@ def trip_details(trip_id):
         "distance": row[7] if len(row) > 7 else 0
     }
     
-    # Reconstruct Trip object for demonstration
-    rider = Rider(user_id=1, name="Default Rider", email="rider@example.com")
-    trip_obj = Trip(trip_data["pickup"], trip_data["destination"], rider, trip_data["strategy"])
-    trip_obj.set_route_info(float(trip_data["distance"]), 10.0)  # Mock duration
+    # Create Trip object from database for comprehensive integration demo
+    trip_obj = create_trip_from_database(trip_id)
     
-    trip_details_body = f"""
-    <nav>
-        <a href="{{ url_for('rider_home.home') }}" class="secondary">Back to Rider Home</a>
-        <a href="{{ url_for('rider_home.advanced_trip') }}" class="secondary">Advanced Trip</a>
-    </nav>
-    
-    <h2>Trip Details (OOP Integration)</h2>
-    
-    <section class="card">
-        <h3>Database Information</h3>
-        <p><strong>Trip ID:</strong> {trip_data['id']}</p>
-        <p><strong>Created:</strong> {trip_data['created_at']}</p>
-        <p><strong>Pickup:</strong> {trip_data['pickup']}</p>
-        <p><strong>Destination:</strong> {trip_data['destination']}</p>
-        <p><strong>State:</strong> {trip_data['state']}</p>
-        <p><strong>Distance:</strong> {trip_data['distance']} km</p>
-    </section>
-    
-    <section class="card" style="margin-top:1rem;">
-        <h3>Trip Object Information</h3>
-        <p><strong>Strategy Used:</strong> {trip_obj.fare_strategy.get_strategy_name()}</p>
-        <p><strong>Strategy Description:</strong> {trip_obj.fare_strategy.get_description()}</p>
-        <p><strong>Calculated Fare:</strong> ${trip_obj.base_fare:.2f}</p>
-        <p><strong>Object State:</strong> {trip_obj.state.value}</p>
-        <p><strong>Trip Object ID:</strong> {trip_obj.trip_id}</p>
-    </section>
-    
-    <section class="card" style="margin-top:1rem;">
-        <h3>Integration Demo</h3>
-        <p class="muted">
-            This page shows how the Trip object from trip_management.py integrates with the web interface.
-            The fare calculation uses the Strategy pattern, and state changes use the Observer pattern.
-        </p>
-    </section>
-    """
+    if trip_obj:
+        trip_details_body = f"""
+        <nav>
+            <a href="{{ url_for('rider_home.home') }}" class="secondary">Back to Rider Home</a>
+            <a href="{{ url_for('rider_home.advanced_trip') }}" class="secondary">Advanced Trip</a>
+        </nav>
+        
+        <h2>Trip Details (Full Trip Management Integration)</h2>
+        
+        <section class="card">
+            <h3>Database Information</h3>
+            <p><strong>Trip ID:</strong> {trip_data['id']}</p>
+            <p><strong>Created:</strong> {trip_data['created_at']}</p>
+            <p><strong>Pickup:</strong> {trip_data['pickup']}</p>
+            <p><strong>Destination:</strong> {trip_data['destination']}</p>
+            <p><strong>State:</strong> {trip_data['state']}</p>
+            <p><strong>Distance:</strong> {trip_data['distance']} km</p>
+        </section>
+        
+        <section class="card" style="margin-top:1rem;">
+            <h3>Trip Object Information (trip_management.py)</h3>
+            <p><strong>Trip Object ID:</strong> {trip_obj.trip_id}</p>
+            <p><strong>Object State:</strong> {trip_obj.state.value} (using TripState enum)</p>
+            <p><strong>Strategy Used:</strong> {trip_obj.fare_strategy.get_strategy_name()}</p>
+            <p><strong>Strategy Description:</strong> {trip_obj.fare_strategy.get_description()}</p>
+            <p><strong>Calculated Fare:</strong> ${trip_obj.base_fare:.2f} (using Strategy pattern)</p>
+            <p><strong>Route Info:</strong> {trip_obj.distance_km:.2f} km, {trip_obj.duration_min:.1f} min</p>
+            <p><strong>Created At:</strong> {trip_obj.created_at.strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p><strong>Attached Observers:</strong> {len(trip_obj._observers)}</p>
+            <p><strong>Rider:</strong> {trip_obj.rider.name} ({trip_obj.rider.user_id})</p>
+            {f'<p><strong>Driver:</strong> {trip_obj.driver.name}</p>' if trip_obj.driver else '<p><strong>Driver:</strong> Not assigned</p>'}
+        </section>
+        
+        <section class="card" style="margin-top:1rem; background: #f8f9fa;">
+            <h3>Trip Object Integration Demo</h3>
+            <p class="muted">
+                This page demonstrates comprehensive integration with <strong>trip_management.py</strong>:
+            </p>
+            <div style="background: #fff; padding: 1rem; border-radius: 6px; margin-top: 1rem;">
+                <h4 style="margin-top: 0; color: #495057;">Full Trip Object Functionality:</h4>
+                <ul style="margin: 0.5rem 0;">
+                    <li><strong>Observer Pattern:</strong> Trip object notifies {len(trip_obj._observers)} attached observers of state changes</li>
+                    <li><strong>Strategy Pattern:</strong> Fare calculated using {trip_obj.fare_strategy.get_strategy_name()} strategy</li>
+                    <li><strong>State Management:</strong> Current state: {trip_obj.state.value} (TripState enum)</li>
+                    <li><strong>Automatic Fare Calculation:</strong> ${trip_obj.base_fare:.2f} calculated from {trip_obj.distance_km:.2f} km route</li>
+                    <li><strong>Database Synchronization:</strong> Trip object state synced with database</li>
+                </ul>
+            </div>
+            
+            <div style="background: #e8f5e8; padding: 1rem; border-radius: 6px; margin-top: 1rem; border-left: 4px solid #28a745;">
+                <h4 style="margin-top: 0; color: #28a745;">Trip Object String Representation:</h4>
+                <code style="background: #f8f9fa; padding: 0.5rem; border-radius: 4px; display: block;">
+                    {str(trip_obj)}
+                </code>
+            </div>
+            
+            <p style="margin: 1rem 0 0 0; font-size: 0.9rem; color: #6c757d;">
+                💡 This Trip object was reconstructed from database data and includes full Observer pattern integration,
+                Strategy pattern fare calculation, and state management from trip_management.py!
+            </p>
+        </section>
+        """
+    else:
+        # Fallback if Trip object creation fails
+        trip_details_body = f"""
+        <nav>
+            <a href="{{ url_for('rider_home.home') }}" class="secondary">Back to Rider Home</a>
+        </nav>
+        
+        <h2>Trip Details</h2>
+        
+        <section class="card">
+            <h3>Database Information</h3>
+            <p><strong>Trip ID:</strong> {trip_data['id']}</p>
+            <p><strong>Created:</strong> {trip_data['created_at']}</p>
+            <p><strong>Pickup:</strong> {trip_data['pickup']}</p>
+            <p><strong>Destination:</strong> {trip_data['destination']}</p>
+            <p><strong>State:</strong> {trip_data['state']}</p>
+            <p><strong>Fare:</strong> ${trip_data['fare']:.2f}</p>
+        </section>
+        
+        <section class="card" style="margin-top:1rem;">
+            <h3>Trip Object Integration</h3>
+            <p class="muted">
+                Could not create Trip object from database data. This may indicate missing data or configuration issues.
+                The Trip object would normally provide Observer pattern integration and Strategy pattern fare calculation.
+            </p>
+        </section>
+        """
     
     body = render_template_string(trip_details_body)
     return render_template_string(BASE_HTML, body=body)
