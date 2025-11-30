@@ -289,3 +289,11 @@ def get_trip_state(trip_id: int) -> str:
         cur.execute("SELECT state FROM trips WHERE id = ?", (trip_id,))
         result = cur.fetchone()
         return result[0] if result else "unknown"
+    
+def update_trip_fare(trip_id: int, new_fare: float):
+    """Update the fare for a trip (used when decorators modify fare)"""
+    with connect() as con:
+        con.execute(
+            "UPDATE trips SET fare = ? WHERE id = ?",
+            (new_fare, trip_id)
+        )

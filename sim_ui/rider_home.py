@@ -164,11 +164,21 @@ def create_rider_from_user_id(user_id: int) -> Rider:
     # Fallback to guest rider if lookup fails
     return Rider(user_id=str(user_id) if user_id else "guest", name="Anonymous Rider", email="guest@example.com", phone="")
 
-def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
+def get_fare_estimate(pickup: str, destination: str, strategy: str, rider_id: int = None) -> dict:
     """Get fare estimate with strategy details for preview using real map data"""
     try:
+        # Import here to avoid circular dependency
+        from fare_decorators import RiderRatingDecorator
+        
         # Create strategy instance to get details
         fare_strategy = FareStrategyFactory.create_strategy(strategy)
+        
+        # Apply rider rating decorator if rider is selected
+        if rider_id:
+            rider_record = db.get_user_by_id(rider_id)
+            if rider_record:
+                rider_rating = float(rider_record[2])  # rating is at index 2
+                fare_strategy = RiderRatingDecorator(fare_strategy, rider_rating)
         
         # Get real route data from map service
         route_info = map_service.calculate_trip_route(pickup, destination)
@@ -188,7 +198,7 @@ def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
             pickup_coords = None
             dest_coords = None
         
-        # Calculate fare using the actual strategy
+        # Calculate fare using the decorated strategy
         fare = fare_strategy.calculate_fare(distance, duration)
         
         return {
@@ -200,14 +210,16 @@ def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
             "pickup_coords": pickup_coords,
             "dest_coords": dest_coords,
             "breakdown": {
-                "base_fare": getattr(fare_strategy, 'BASE_FARE', 0),
-                "per_km_rate": getattr(fare_strategy, 'PER_KM_RATE', 0),
-                "per_minute_rate": getattr(fare_strategy, 'PER_MINUTE_RATE', 0),
-                "surge_multiplier": getattr(fare_strategy, 'SURGE_MULTIPLIER', 1.0)
+                "base_fare": getattr(fare_strategy._wrapped_strategy if hasattr(fare_strategy, '_wrapped_strategy') else fare_strategy, 'BASE_FARE', 0),
+                "per_km_rate": getattr(fare_strategy._wrapped_strategy if hasattr(fare_strategy, '_wrapped_strategy') else fare_strategy, 'PER_KM_RATE', 0),
+                "per_minute_rate": getattr(fare_strategy._wrapped_strategy if hasattr(fare_strategy, '_wrapped_strategy') else fare_strategy, 'PER_MINUTE_RATE', 0),
+                "surge_multiplier": getattr(fare_strategy._wrapped_strategy if hasattr(fare_strategy, '_wrapped_strategy') else fare_strategy, 'SURGE_MULTIPLIER', 1.0)
             }
         }
     except Exception as e:
         print(f"Error calculating fare estimate: {e}")
+        import traceback
+        traceback.print_exc()
         # Fallback to default values
         return {
             "fare": 10.0,
@@ -219,7 +231,7 @@ def get_fare_estimate(pickup: str, destination: str, strategy: str) -> dict:
             "dest_coords": None,
             "breakdown": {}
         }
-
+    
 def estimate_distance(pickup: str, destination: str) -> float:
     """Calculate distance using map service API"""
     try:
@@ -959,8 +971,8 @@ def home():
                 flash(f"Selected rider {selected_rider['name']} has an active trip. Please select a different rider.", "error")
                 return redirect(url_for("rider_home.home"))
             
-            # Use integrated fare calculation for preview
-            fare_estimate = get_fare_estimate(pickup, destination, strategy)
+            # Use integrated fare calculation for preview WITH RIDER RATING DECORATOR
+            fare_estimate = get_fare_estimate(pickup, destination, strategy, rider_id=selected_rider_id)
             
             # Create enhanced map with route visualization
             pickup_coords = fare_estimate.get("pickup_coords")
@@ -983,7 +995,7 @@ def home():
             )
 
             return render_template_string(BASE_HTML, body=body)
-            
+        
         elif action == "confirm":
             # Confirm from Trip Preview page: validate rider and create trip using full Trip object integration
             if not selected_rider or not selected_rider["available"]:

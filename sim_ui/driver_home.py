@@ -371,6 +371,9 @@ def get_mock_requests():
 def accept_trip_with_objects(trip_id: int, driver_id: int) -> bool:
     """Accept a trip using full Trip object functionality with Observer pattern integration"""
     try:
+        # Import here to avoid circular dependency
+        from fare_decorators import DriverRatingDecorator
+        
         # Create Trip object from database with full Observer integration
         trip_obj = create_trip_from_database(trip_id)
         if not trip_obj:
@@ -382,6 +385,22 @@ def accept_trip_with_objects(trip_id: int, driver_id: int) -> bool:
         if not driver:
             print(f"Failed to create Driver object for driver {driver_id}")
             return False
+        
+        # Get driver rating from database
+        driver_record = db.get_user_by_id(driver_id)
+        if driver_record:
+            driver_rating = float(driver_record[2])  # rating at index 2
+            
+            # Apply driver rating decorator to fare strategy
+            original_strategy = trip_obj.fare_strategy
+            trip_obj.fare_strategy = DriverRatingDecorator(original_strategy, driver_rating)
+            
+            # Recalculate fare with rating decorator
+            trip_obj.base_fare = trip_obj.fare_strategy.calculate_fare(
+                trip_obj.distance_km,
+                trip_obj.duration_min
+            )
+            print(f"[Decorator Pattern] Applied driver rating decorator (⭐{driver_rating}) - New fare: ${trip_obj.base_fare:.2f}")
         
         # OBSERVER PATTERN INTEGRATION:
         # Attach the Driver as an observer before accepting the trip
@@ -401,7 +420,7 @@ def accept_trip_with_objects(trip_id: int, driver_id: int) -> bool:
         trip_obj.accept(driver)
         print(f"[Trip Management] Trip {trip_id} successfully accepted by {driver.name}, state: {trip_obj.state.value}")
         
-        # Update database to reflect Trip object state
+        # Update database to reflect Trip object state WITH NEW DECORATED FARE
         db.update_trip_from_object(trip_id, trip_obj)
         db.assign_driver_to_trip(trip_id, driver_id)  # Update driver assignment in database
         
@@ -413,7 +432,7 @@ def accept_trip_with_objects(trip_id: int, driver_id: int) -> bool:
         import traceback
         traceback.print_exc()
         return False
-
+    
 def start_trip_with_objects(trip_id: int) -> bool:
     """Start a trip using Trip object functionality with Observer notifications"""
     try:
