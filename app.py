@@ -10,6 +10,10 @@ def create_app():
     app.secret_key = 'uber_lyft_sim_secret_key_2025'  
 
 
+    
+    # Set a secret key for session management and flash messages
+    app.secret_key = 'uber_lyft_sim_secret_key_2025'  # In production, use a more secure random key
+    
     app.register_blueprint(rider_home)
     app.register_blueprint(driver_home, url_prefix="/driver")
     app.register_blueprint(dashboard_home) 

@@ -135,7 +135,7 @@ class MapService:
                 summary = route["summary"]
                 
                 return {
-                    "distance_km": summary["distance"] / 1000,  # Convert meters to km
+                    "distance_km": summary["distance"], 
                     "duration_min": summary["duration"] / 60,   # Convert seconds to minutes
                     "geometry": route.get("geometry"),
                     "bbox": route.get("bbox"),

@@ -35,7 +35,9 @@ class Trip(Subject):
         self.duration_min: float = 0.0
         
         # Strategy pattern - fare calculation
-        self.fare_strategy: FareStrategy = FareStrategyFactory.create_strategy(strategy_name)
+        # Normalize strategy name to proper case (handle mixed case from database)
+        normalized_strategy = strategy_name.capitalize() if strategy_name else "Standard"
+        self.fare_strategy: FareStrategy = FareStrategyFactory.create_strategy(normalized_strategy)
         self.base_fare: float = 0.0
     
     @property
