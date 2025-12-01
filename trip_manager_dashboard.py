@@ -196,7 +196,6 @@ class TripController:
         """Return trips as a DataFrame for analytics."""
         rows = db.list_trips(limit=limit)
 
-        # Your trips table now has 10 columns, so give Pandas 10 names
         df = pd.DataFrame(
           rows,
           columns=[
