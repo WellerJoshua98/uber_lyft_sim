@@ -211,37 +211,9 @@ class TripController:
             "rider_id",
             "driver_id",
           ],
-    )
-
-    if not df.empty:
-        df["created_at"] = pd.to_datetime(df["created_at"])
-
-    return df
-
-
-    if not df.empty:
-        df["created_at"] = pd.to_datetime(df["created_at"])
-
-    return df
-
-
-
-
-    if not df.empty:
-        df["created_at"] = pd.to_datetime(df["created_at"])
-
-    return df
-
-
-
-
-    if not df.empty:
-        df["created_at"] = pd.to_datetime(df["created_at"])
-
-    return df
-
+        )
         if not df.empty:
-            df["created_at"] = pd.to_datetime(df["created_at"])
+          df["created_at"] = pd.to_datetime(df["created_at"])
         return df
 
 
