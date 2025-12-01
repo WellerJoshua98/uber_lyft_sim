@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Trip Dashboard</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 2rem;
+        }
+        h1 {
+            margin-bottom: 0.25rem;
+        }
+        h2 {
+            margin-top: 1.5rem;
+        }
+        .kpi-list {
+            margin-left: 1.5rem;
+        }
+        .charts {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2rem;
+            margin-top: 1rem;
+        }
+        .chart-card {
+            flex: 1 1 300px;
+        }
+        .chart-card img {
+            max-width: 100%;
+            border: 1px solid #ccc;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        a {
+            color: #0645ad;
+        }
+    </style>
+</head>
+<body>
+    <h1>Trip Dashboard</h1>
+
+    <h2>Key Metrics</h2>
+    {% if kpi %}
+    <ul class="kpi-list">
+        <li>Total trips: {{ kpi.trips }}</li>
+        <li>Completed trips: {{ kpi.completed }}</li>
+        <li>Average fare: ${{ "%.2f"|format(kpi.avg_fare) }}</li>
+        <li>Total revenue: ${{ "%.2f"|format(kpi.total_revenue) }}</li>
+        <li>Average distance (km): {{ "%.2f"|format(kpi.avg_distance_km) }}</li>
+    </ul>
+    {% else %}
+    <p>No trip data available yet.</p>
+    {% endif %}
+
+    <h2>Visualizations</h2>
+    <div class="charts">
+        <div class="chart-card">
+            <h3>Trips per Day</h3>
+            <img src="{{ url_for('static', filename='trips_per_day.png') }}" alt="Trips per day chart">
+        </div>
+
+        <div class="chart-card">
+            <h3>Trips by Fare Type</h3>
+            <img src="{{ url_for('static', filename='trips_by_strategy.png') }}" alt="Trips by fare type chart">
+        </div>
+
+        <div class="chart-card">
+            <h3>Revenue by Day (Completed)</h3>
+            <img src="{{ url_for('static', filename='revenue_by_day.png') }}" alt="Revenue by day chart">
+        </div>
+    </div>
+
+    <h2>Map</h2>
+    <p>
+        <a href="/dashboard/map" target="_blank">Open interactive trip map</a>
+    </p>
+</body>
+</html>
