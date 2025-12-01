@@ -317,7 +317,7 @@ def build_trip_map(df: pd.DataFrame,
     return html_path
 
 
-# Demo run (only when executed as a script)
+# Demo run 
 
 
 if __name__ == "__main__":
@@ -418,7 +418,7 @@ if __name__ == "__main__":
         plt.ylabel("Trips")
         plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
-    plt.savefig("trips_per_day.png")
+    plt.savefig("static/trips_per_day.png")
     plt.show()
 
     # Trips by fare type
@@ -432,7 +432,7 @@ if __name__ == "__main__":
         plt.xlabel("Fare Type")
         plt.ylabel("Trips")
     plt.tight_layout()
-    plt.savefig("trips_by_strategy.png")
+    plt.savefig("static/trips_by_strategy.png")
     plt.show()
 
     # Revenue by day
@@ -447,7 +447,7 @@ if __name__ == "__main__":
         plt.ylabel("Revenue ($)")
         plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
-    plt.savefig("revenue_by_day.png")
+    plt.savefig("static/revenue_by_day.png")
     plt.show()
 
     # Map
