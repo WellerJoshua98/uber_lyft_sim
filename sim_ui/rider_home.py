@@ -456,6 +456,7 @@ HOME_BODY = """
     <nav>
         <a href="{{ url_for('rider_home.home') }}"><strong>Rider Home</strong></a>
         <a href="{{ url_for('driver_home.home') }}" class="secondary">Driver Home</a>
+        <a href="{{ url_for('rider_home.past_trips') }}" class="secondary">Past Trips</a>
     </nav>
 
     <h2>Rider Homepage</h2>
@@ -566,7 +567,7 @@ HOME_BODY = """
     {% elif selected_rider and selected_rider.available %}
     <section class="card">
         <h3 style="margin-top: 0;">Request Trip for {{ selected_rider.name }}</h3>
-        <form method="POST" action="{{ url_for('rider_home.home') }}">
+        <form method="POST" action="{{ url_for('rider_home.home') }}" id="tripForm">
             <input type="hidden" name="selected_rider_id" value="{{ selected_rider.id }}">
             
             <div class="grid-2">
@@ -621,10 +622,17 @@ HOME_BODY = """
             </script>
 
             <div class="actions">
-                <button type="submit" name="action" value="preview" class="contrast">Preview Route &amp; Fare</button>
+                <button type="button" onclick="submitPreview()" class="contrast">Preview Route &amp; Fare</button>
                 <button type="submit" name="action" value="request">Request Trip</button>
-                <a role="button" href="{{ url_for('rider_home.past_trips') }}" class="secondary">View Past Trips</a>
             </div>
+            
+            <script>
+                function submitPreview() {
+                    const form = document.getElementById('tripForm');
+                    form.action = "{{ url_for('rider_home.trip_preview', user_id=selected_rider.id) }}";
+                    form.submit();
+                }
+            </script>
         </form>
     </section>
     {% else %}
@@ -698,7 +706,7 @@ PREVIEW_BODY = """
   </p>
 </section>
 
-<form method="POST" action="{{ url_for('rider_home.home') }}" style="margin-top:1rem;">
+<form method="POST" action="{{ url_for('rider_home.trip_preview', user_id=user_id) }}" style="margin-top:1rem;">
   <!-- carry data back as hidden inputs -->
   <input type="hidden" name="pickup" value="{{ pickup }}">
   <input type="hidden" name="destination" value="{{ destination }}">
@@ -769,7 +777,9 @@ TRIP_SUMMARY_BODY = """
     <hr>
 
     <p style="margin:.25rem 0;"><strong>Trip ID:</strong> {{ trip.id }}</p>
+    {% if trip.state == 'completed' %}
     <p style="margin:.25rem 0;"><strong>Completed At:</strong> {{ trip.created_at }}</p>
+    {% endif %}
     <p style="margin:.25rem 0;"><strong>Status:</strong> {{ trip.status }}</p>
     <p style="margin:.25rem 0;"><strong>Fare:</strong> ${{ "%.2f"|format(trip.fare) }}</p>
   </section>
@@ -893,6 +903,7 @@ LIVE_TRIP_BODY = """
 
     <hr>
 
+    {% if driver %}
     <h3 style="margin-top:0;">Driver &amp; Car</h3>
     <p style="margin:.25rem 0;"><strong>Driver:</strong> {{ driver.name }}</p>
     <p style="margin:.25rem 0;">
@@ -905,6 +916,15 @@ LIVE_TRIP_BODY = """
     <p class="muted" style="margin-top:.25rem;">
       ETA: ~{{ driver.eta_min }} minutes · Trip ID: {{ trip.id }} · Fare: ${{ "%.2f"|format(trip.fare) }}
     </p>
+    {% else %}
+    <h3 style="margin-top:0;">Driver Assignment</h3>
+    <p style="margin:.25rem 0; color: #666;">
+      <strong>Status:</strong> Waiting for driver assignment
+    </p>
+    <p class="muted" style="margin-top:.25rem;">
+      Trip ID: {{ trip.id }} · Fare: ${{ "%.2f"|format(trip.fare) }}
+    </p>
+    {% endif %}
   </section>
 
   <section class="card" style="margin-top:1rem;">
@@ -960,62 +980,6 @@ def home():
         if action == "select_rider":
             # Just selecting a rider, refresh page with rider selected
             pass
-            
-        elif action == "preview":
-            # Validate rider selection and availability
-            if not selected_rider:
-                flash("Please select a rider first.", "error")
-                return redirect(url_for("rider_home.home"))
-            
-            if not selected_rider["available"]:
-                flash(f"Selected rider {selected_rider['name']} has an active trip. Please select a different rider.", "error")
-                return redirect(url_for("rider_home.home"))
-            
-            # Use integrated fare calculation for preview WITH RIDER RATING DECORATOR
-            fare_estimate = get_fare_estimate(pickup, destination, strategy, rider_id=selected_rider_id)
-            
-            # Create enhanced map with route visualization
-            pickup_coords = fare_estimate.get("pickup_coords")
-            dest_coords = fare_estimate.get("dest_coords")
-            fmap_html = make_map(pickup_coords, dest_coords)
-
-            body = render_template_string(
-                PREVIEW_BODY,
-                pickup=pickup,
-                destination=destination,
-                strategy=strategy,
-                distance_km=fare_estimate["distance_km"],
-                eta_min=fare_estimate["duration_min"],
-                fare=fare_estimate["fare"],
-                strategy_description=fare_estimate["strategy_description"],
-                breakdown=fare_estimate["breakdown"],
-                pickup_coords=pickup_coords,
-                dest_coords=dest_coords,
-                fmap=fmap_html
-            )
-
-            return render_template_string(BASE_HTML, body=body)
-        
-        elif action == "confirm":
-            # Confirm from Trip Preview page: validate rider and create trip using full Trip object integration
-            if not selected_rider or not selected_rider["available"]:
-                flash("Cannot create trip: rider not available.", "error")
-                return redirect(url_for("rider_home.home"))
-                
-            # Create rider object and Trip object with full trip_management.py integration
-            rider = create_rider_from_user_id(selected_rider_id)
-            trip_obj = create_trip_with_objects(pickup, destination, strategy, rider)
-            
-            # Save to database using Trip object properties
-            trip_id = db.create_trip(pickup, destination, strategy, trip_obj.base_fare, selected_rider_id)
-            
-            # Store Trip object ID mapping for future reference
-            if trip_id:
-                trip_obj.trip_id = trip_id
-                print(f"[Trip Management] Created trip {trip_id} with Trip object {trip_obj.trip_id}, state: {trip_obj.state.value}")
-            
-            flash(f"Trip successfully requested for {selected_rider['name']} using Trip object (${trip_obj.base_fare:.2f})!", "success")
-            return redirect(url_for("rider_home.past_trips"))
             
         elif action == "cancel":
             # From Trip Preview: just go back to clean Rider Home
@@ -1077,6 +1041,88 @@ def home():
         get_status_label=get_status_label
     )
 
+    return render_template_string(BASE_HTML, body=body)
+
+@rider_home.route("/trip-preview/<int:user_id>", methods=["GET", "POST"])
+def trip_preview(user_id):
+    """Handle trip preview with dedicated URL including user ID"""
+    pickup = request.form.get("pickup", "").strip()
+    destination = request.form.get("destination", "").strip()
+    strategy = request.form.get("strategy", "Standard")
+    action = request.form.get("action")
+    
+    # Get rider information
+    available_riders = get_available_riders_with_status()
+    selected_rider = None
+    
+    for rider in available_riders:
+        if rider["id"] == user_id:
+            selected_rider = rider
+            break
+    
+    if not selected_rider:
+        flash("Rider not found.", "error")
+        return redirect(url_for("rider_home.home"))
+    
+    if not selected_rider["available"]:
+        flash(f"Selected rider {selected_rider['name']} has an active trip. Please select a different rider.", "error")
+        return redirect(url_for("rider_home.home"))
+    
+    if request.method == "POST":
+        if action == "confirm":
+            # Confirm and create trip
+            if not pickup or not destination:
+                flash("Please enter both pickup and destination addresses.", "error")
+                return redirect(url_for("rider_home.home"))
+            
+            # Create rider object and Trip object with full trip_management.py integration
+            rider = create_rider_from_user_id(user_id)
+            trip_obj = create_trip_with_objects(pickup, destination, strategy, rider)
+            
+            # Save to database using Trip object properties
+            trip_id = db.create_trip(pickup, destination, strategy, trip_obj.base_fare, user_id)
+            
+            # Store Trip object ID mapping for future reference
+            if trip_id:
+                trip_obj.trip_id = trip_id
+                print(f"[Trip Management] Created trip {trip_id} with Trip object {trip_obj.trip_id}, state: {trip_obj.state.value}")
+            
+            flash(f"Trip successfully requested for {selected_rider['name']} using Trip object (${trip_obj.base_fare:.2f})!", "success")
+            return redirect(url_for("rider_home.past_trips"))
+            
+        elif action == "cancel":
+            return redirect(url_for("rider_home.home"))
+    
+    # Validate addresses
+    if not pickup or not destination:
+        flash("Please enter both pickup and destination addresses.", "error")
+        return redirect(url_for("rider_home.home"))
+    
+    # Get fare estimate
+    fare_estimate = get_fare_estimate(pickup, destination, strategy)
+    
+    # Create enhanced map with route visualization
+    pickup_coords = fare_estimate.get("pickup_coords")
+    dest_coords = fare_estimate.get("dest_coords")
+    fmap_html = make_map(pickup_coords, dest_coords)
+    
+    body = render_template_string(
+        PREVIEW_BODY,
+        pickup=pickup,
+        destination=destination,
+        strategy=strategy,
+        distance_km=fare_estimate["distance_km"],
+        eta_min=fare_estimate["duration_min"],
+        fare=fare_estimate["fare"],
+        strategy_description=fare_estimate["strategy_description"],
+        breakdown=fare_estimate["breakdown"],
+        pickup_coords=pickup_coords,
+        dest_coords=dest_coords,
+        selected_rider=selected_rider,
+        user_id=user_id,
+        fmap=fmap_html
+    )
+    
     return render_template_string(BASE_HTML, body=body)
 
 @rider_home.route("/create-rider", methods=["GET", "POST"])
@@ -1211,7 +1257,8 @@ def trip_summary(trip_id):
             "destination": row[3],
             "strategy": row[4],
             "fare": row[5],
-            "state": row[6]
+            "state": row[6],
+            "status": get_status_label(row[6])  # Add status field for template
         }
         rrow = db.get_review_by_trip_id(trip_id)
         review = None
@@ -1256,7 +1303,8 @@ def trip_receipt(trip_id):
             "destination": row[3],
             "strategy": row[4],
             "fare": row[5],
-            "state": row[6]
+            "state": row[6],
+            "status": get_status_label(row[6])  # Add status field for template
         }
     
     body = render_template_string(TRIP_RECEIPT_BODY, trip=trip)
