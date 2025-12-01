@@ -30,9 +30,15 @@ except Exception as e:
 
 def invalidate_caches():
     """Invalidate all caches when data changes"""
-    global _driver_cache_time, _trip_cache_time
+    global _driver_cache_time, _trip_cache_time, _progress_cache, _progress_cache_time
     _driver_cache_time = 0
     _trip_cache_time = 0
+    _progress_cache.clear()
+    _progress_cache_time.clear()
+    # Also clear the LRU caches for fresh data
+    get_user_info_cached.cache_clear()
+    get_trip_route_info.cache_clear()
+    make_driver_map.cache_clear()
 
 def create_rider_from_trip_data(trip_row) -> Rider:
     """Create a Rider object from trip database data with proper user lookup"""
@@ -247,6 +253,24 @@ def make_driver_map(trip_pickup=None, trip_destination=None, driver_location=Non
     
     return fmap._repr_html_()
 
+@lru_cache(maxsize=64)
+def get_user_info_cached(user_id: int):
+    """Get user information with caching to avoid repeated database calls"""
+    try:
+        user_record = db.get_user_by_id(user_id)
+        if user_record:
+            return {
+                'id': user_record[0],
+                'name': user_record[1],
+                'rating': user_record[2],
+                'role': user_record[3],
+                'vehicle_type': user_record[5] if len(user_record) > 5 else None,
+                'license_plate': user_record[6] if len(user_record) > 6 else None
+            }
+    except Exception as e:
+        print(f"Error getting user {user_id}: {e}")
+    return None
+
 @lru_cache(maxsize=128)
 def get_trip_route_info(pickup_address: str, destination_address: str):
     """Get route information for a trip to enhance driver navigation with caching"""
@@ -357,6 +381,11 @@ _trip_cache = {}
 _trip_cache_time = 0
 _TRIP_CACHE_TIMEOUT = 10  # seconds
 
+# Cache for trip progress pages (cache for 5 seconds for real-time feel)
+_progress_cache = {}
+_progress_cache_time = {}
+_PROGRESS_CACHE_TIMEOUT = 5  # seconds
+
 def get_pending_trip_requests():
     """Get pending trip requests with lightweight processing and caching"""
     global _trip_cache, _trip_cache_time
@@ -424,12 +453,6 @@ def get_pending_trip_requests():
         print(f"Error getting pending trips: {e}")
         return _trip_cache.get('trips', [])
 
-def invalidate_caches():
-    """Invalidate all caches when data changes"""
-    global _driver_cache_time, _trip_cache_time
-    _driver_cache_time = 0
-    _trip_cache_time = 0
-
 def get_mock_requests():
     """Keep original mock function for fallback"""
     return [
@@ -490,9 +513,15 @@ def accept_trip_with_objects(trip_id: int, driver_id: int) -> bool:
         trip_obj.accept(driver)
         print(f"[Trip Management] Trip {trip_id} successfully accepted by {driver.name}, state: {trip_obj.state.value}")
         
-        # Update database to reflect Trip object state WITH NEW DECORATED FARE
-        db.update_trip_from_object(trip_id, trip_obj)
-        db.assign_driver_to_trip(trip_id, driver_id)  # Update driver assignment in database
+        # Update driver assignment in database FIRST
+        db.assign_driver_to_trip(trip_id, driver_id)  # This sets driver_id and state to 'accepted'
+        
+        # Then update other trip details from object (but preserve driver assignment)
+        with db.connect() as con:
+            con.execute(
+                "UPDATE trips SET fare = ?, distance = ? WHERE id = ?",
+                (trip_obj.base_fare, int(trip_obj.distance_km), trip_id)
+            )
         
         print(f"[Observer Pattern] Trip {trip_id} acceptance complete with {len(trip_obj._observers)} observers notified")
         return True
@@ -694,29 +723,6 @@ HOME_BODY = """
   {% endif %}
 </section>
 
-{% if selected_driver.is_available %}
-<section class="card" style="margin-bottom: 2rem; background-color: #f8f9fa; border-left: 4px solid #007bff;">
-  <h4 style="margin-top: 0; color: #007bff;">🎯 Trip Management Integration</h4>
-  <div style="font-size: 0.9rem; color: #495057;">
-    <p style="margin: 0.5rem 0;">This driver interface fully utilizes <strong>trip_management.py</strong> with comprehensive design pattern integration:</p>
-    <ul style="margin: 0.5rem 0; padding-left: 1.5rem;">
-      <li><strong>Observer Pattern:</strong> Automatic notifications when trip states change (riders, drivers, and loggers receive updates)</li>
-      <li><strong>Strategy Pattern:</strong> Dynamic fare calculation using different algorithms (Standard, Surge, Premium)</li>
-      <li><strong>Trip Object Lifecycle:</strong> Complete state management from request through completion</li>
-      <li><strong>Database Integration:</strong> Trip objects sync with database for persistent state</li>
-      <li><strong>Real-time Updates:</strong> All stakeholders notified instantly of trip status changes</li>
-      <li><strong>Performance Optimized:</strong> Caching and lazy loading for faster page loads ⚡</li>
-    </ul>
-    <p style="margin: 0.5rem 0; padding: 0.5rem; background-color: #e8f4fd; border-radius: 4px;">
-      💡 <strong>Observer Pattern in Action:</strong> When {{ selected_driver.name }} accepts/starts/completes trips, 
-      all attached observers (rider, driver, state logger) automatically receive notifications.
-    </p>
-    <p style="margin: 0.5rem 0; padding: 0.5rem; background-color: #d4edda; border-radius: 4px; color: #155724;">
-      ⚡ <strong>Performance:</strong> Driver data cached for 30s, trip data cached for 10s, route calculations cached for faster loading.
-    </p>
-  </div>
-</section>
-{% endif %}
 {% endif %}
 
 <!-- Trip Requests Section -->
@@ -739,14 +745,15 @@ HOME_BODY = """
           <h3 style="margin:0">Request #{{ r.id }}</h3>
           <span class="pill">Est. Fare: ${{ '%.2f'|format(r.fare) }}</span>
         </div>
-        <p style="margin:.5rem 0 0 0"><strong>Pickup:</strong> {{ r.pickup }}</p>
+        <p style="margin:.25rem 0 0 0"><strong>Rider:</strong> {{ r.rider_name }}</p>
+        <p style="margin:.25rem 0 0 0"><strong>Pickup:</strong> {{ r.pickup }}</p>
         <p style="margin:.25rem 0 .5rem 0"><strong>Destination:</strong> {{ r.destination }}</p>
         
         <div style="display: flex; gap: 1rem; margin: .5rem 0; font-size: .9rem; color: #666;">
-          <span>📏 {{ "%.1f"|format(r.distance_km) }} km</span>
-          <span>⏱️ {{ "%.0f"|format(r.duration_min) }} min</span>
-          <span>🎯 {{ r.strategy }}</span>
-          {% if r.has_real_data %}
+          <span>📏 {{ "%.1f"|format(r.distance_km if r.distance_km is defined else 5.0) }} km</span>
+          <span>⏱️ {{ "%.0f"|format(r.duration_min if r.duration_min is defined else 10.0) }} min</span>
+          <span>🎯 {{ r.strategy if r.strategy is defined else 'Standard' }}</span>
+          {% if r.has_real_data is defined and r.has_real_data %}
             <span style="color: #28a745;">✅ Real route data</span>
           {% else %}
             <span style="color: #ffc107;">⚠️ Estimated</span>
@@ -911,21 +918,6 @@ TRIP_PROGRESS_BODY = """
         <strong>Current status:</strong> {{ status_label }}
       {% endif %}
     </div>
-    
-    <!-- Trip Management Integration Status -->
-    <div style="margin-top: 1rem; padding: 0.75rem; background-color: #e8f4fd; border-radius: 6px; border-left: 4px solid #007bff;">
-      <h4 style="margin: 0 0 0.5rem 0; color: #007bff; font-size: 1rem;">🎯 Trip Object Integration</h4>
-      <div style="font-size: 0.85rem; color: #495057;">
-        <p style="margin: 0.25rem 0;">✅ <strong>Observer Pattern:</strong> Trip state changes automatically notify all observers</p>
-        <p style="margin: 0.25rem 0;">✅ <strong>Strategy Pattern:</strong> Dynamic fare calculation using {{ trip.strategy or 'Standard' }} strategy</p>
-        <p style="margin: 0.25rem 0;">✅ <strong>State Management:</strong> Trip object manages state transitions ({{ status_label }})</p>
-        <p style="margin: 0.25rem 0;">✅ <strong>Database Sync:</strong> Trip object state synchronized with persistent storage</p>
-        <p style="margin: 0.25rem 0; padding: 0.5rem; background-color: #fff; border-radius: 3px; font-style: italic;">
-          💡 This demonstrates complete trip_management.py utilization with Observer pattern, 
-          Strategy pattern, and full object lifecycle management.
-        </p>
-      </div>
-    </div>
   </form>
 {% endif %}
 """
@@ -934,6 +926,7 @@ TRIP_PROGRESS_BODY = """
 def home():
     banner = None
     selected_driver = None
+  
     
     # Only process form data on actual POST requests with form data
     if request.method == "POST" and request.form:
@@ -1072,9 +1065,7 @@ def home():
     # Get pending trip requests 
     requests = get_pending_trip_requests()
     
-    # Fallback to old system if no real requests
-    if not requests:
-        requests = get_mock_requests()
+    # No fallback - show empty list when no real requests
 
     body = render_template_string(
         HOME_BODY,
@@ -1097,6 +1088,17 @@ def home():
 """
 @driver_home.route("/trip/<int:trip_id>/progress", methods=["GET", "POST"])
 def trip_progress(trip_id):
+    global _progress_cache, _progress_cache_time
+    
+    # Check cache for GET requests (skip cache for POST to handle state changes)
+    cache_key = f"trip_{trip_id}"
+    current_time = time.time()
+    
+    if request.method == "GET" and cache_key in _progress_cache:
+        if current_time - _progress_cache_time.get(cache_key, 0) < _PROGRESS_CACHE_TIMEOUT:
+            cached_data = _progress_cache[cache_key]
+            return render_template_string(BASE_HTML, body=cached_data)
+    
     row = db.get_trip_by_id(trip_id)
     if row is None:
         trip = None
@@ -1104,21 +1106,22 @@ def trip_progress(trip_id):
         driver_info = None
         rider_info = None
     else:
-        # TRIP MANAGEMENT INTEGRATION:
-        # Create Trip object using enhanced create_trip_from_database with full Observer pattern
-        trip_obj = create_trip_from_database(trip_id)
-        if not trip_obj:
-            print(f"Failed to create Trip object from database for trip {trip_id}")
-            # Fallback to manual Trip creation
-            rider = create_rider_from_trip_data(row)
-            trip_obj = Trip(row[2], row[3], rider, row[4])  # pickup, destination, strategy
-            trip_obj.trip_id = trip_id
+        # Use lightweight approach - avoid heavy Trip object creation for GET requests
+        if request.method == "GET":
+            # Fast path for display - just use database state
+            current_state = row[6] if len(row) > 6 else "requested"
+        else:
+            # Full Trip object only for POST requests that need state transitions
+            trip_obj = create_trip_from_database(trip_id)
+            if not trip_obj:
+                print(f"Failed to create Trip object from database for trip {trip_id}")
+                # Fallback to manual Trip creation
+                rider = create_rider_from_trip_data(row)
+                trip_obj = Trip(row[2], row[3], rider, row[4])  # pickup, destination, strategy
+                trip_obj.trip_id = trip_id
+            current_state = trip_obj.state.value if trip_obj else (row[6] if len(row) > 6 else "requested")
         
-        # Get current state from Trip object (more reliable than database)
-        current_state = trip_obj.state.value if trip_obj else (row[6] if len(row) > 6 else "requested")
-        print(f"[Trip Management] Trip {trip_id} loaded with state: {current_state}, observers: {len(trip_obj._observers) if trip_obj else 0}")
-        
-        # Get driver and rider information
+        # Get driver and rider information using cached lookups
         driver_id = row[9] if len(row) > 9 else None  # driver_id from trips table
         rider_id = row[8] if len(row) > 8 else None   # user_id from trips table
         
@@ -1126,23 +1129,23 @@ def trip_progress(trip_id):
         rider_info = None
         
         if driver_id:
-            driver_record = db.get_user_by_id(driver_id)
-            if driver_record:
+            user_data = get_user_info_cached(driver_id)
+            if user_data:
                 driver_info = {
-                    'id': driver_record[0],
-                    'name': driver_record[1],
-                    'rating': driver_record[2],
-                    'vehicle_type': driver_record[5] if len(driver_record) > 5 else 'Unknown',
-                    'license_plate': driver_record[6] if len(driver_record) > 6 else 'N/A'
+                    'id': user_data['id'],
+                    'name': user_data['name'],
+                    'rating': user_data['rating'],
+                    'vehicle_type': user_data['vehicle_type'] or 'Unknown',
+                    'license_plate': user_data['license_plate'] or 'N/A'
                 }
         
         if rider_id:
-            rider_record = db.get_user_by_id(rider_id)
-            if rider_record:
+            user_data = get_user_info_cached(rider_id)
+            if user_data:
                 rider_info = {
-                    'id': rider_record[0],
-                    'name': rider_record[1],
-                    'rating': rider_record[2]
+                    'id': user_data['id'],
+                    'name': user_data['name'],
+                    'rating': user_data['rating']
                 }
         
         trip = {
@@ -1222,6 +1225,12 @@ def trip_progress(trip_id):
         driver_info=driver_info,
         rider_info=rider_info,
     )
+    
+    # Cache the result for GET requests to improve performance
+    if request.method == "GET" and trip:
+        _progress_cache[cache_key] = body
+        _progress_cache_time[cache_key] = current_time
+    
     return render_template_string(BASE_HTML, body=body)
 
 @driver_home.route("/create-driver", methods=["POST"])
