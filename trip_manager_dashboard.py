@@ -191,17 +191,55 @@ class TripController:
         """Cancel trip in DB (Trip class may not implement cancel())."""
         _trip, db_id = self.live_trips[team_trip_id]
         db.update_trip_status(db_id, "cancelled")
-
+      
     def trips_df(self, limit=1000) -> pd.DataFrame:
         """Return trips as a DataFrame for analytics."""
         rows = db.list_trips(limit=limit)
+
+        # Your trips table now has 10 columns, so give Pandas 10 names
         df = pd.DataFrame(
-            rows,
-            columns=[
-                "id", "created_at", "pickup", "destination",
-                "strategy", "fare", "state", "distance",
-            ],
-        )
+          rows,
+          columns=[
+            "id",
+            "created_at",
+            "pickup",
+            "destination",
+            "strategy",
+            "fare",
+            "state",
+            "distance",
+            "rider_id",
+            "driver_id",
+          ],
+    )
+
+    if not df.empty:
+        df["created_at"] = pd.to_datetime(df["created_at"])
+
+    return df
+
+
+    if not df.empty:
+        df["created_at"] = pd.to_datetime(df["created_at"])
+
+    return df
+
+
+
+
+    if not df.empty:
+        df["created_at"] = pd.to_datetime(df["created_at"])
+
+    return df
+
+
+
+
+    if not df.empty:
+        df["created_at"] = pd.to_datetime(df["created_at"])
+
+    return df
+
         if not df.empty:
             df["created_at"] = pd.to_datetime(df["created_at"])
         return df
