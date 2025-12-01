@@ -326,6 +326,61 @@ def build_trip_map(df: pd.DataFrame,
     return html_path
 
 
+def generate_dashboard_charts(df: pd.DataFrame, out_dir: str = "static") -> None:
+    """
+    Generate PNG plots for:
+      - Trips per Day
+      - Trips by Fare Type
+      - Revenue by Day (Completed)
+
+    and save them into the given output directory (default: static/).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    if df.empty:
+        # Nothing to plot
+        return
+
+    # Ensure date column exists
+    if "date" not in df.columns:
+        df["date"] = df["created_at"].dt.date
+
+    # Trips per Day 
+    plt.figure()
+    plt.title("Trips per Day")
+    grouped = df.groupby("date").size()
+    plt.bar(grouped.index.astype(str), grouped.values)
+    plt.xlabel("Date")
+    plt.ylabel("Trips")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "trips_per_day.png"), bbox_inches="tight")
+    plt.close()
+
+    #  Trips by Fare Type 
+    plt.figure()
+    plt.title("Trips by Fare Type")
+    counts = df["strategy"].str.title().value_counts()
+    plt.bar(counts.index.astype(str), counts.values)
+    plt.xlabel("Fare Type")
+    plt.ylabel("Trips")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "trips_by_strategy.png"), bbox_inches="tight")
+    plt.close()
+
+    # Revenue by Day (Completed only) 
+    plt.figure()
+    plt.title("Revenue by Day (Completed)")
+    rev = df[df["state"] == "completed"].groupby("date")["fare"].sum()
+    plt.bar(rev.index.astype(str), rev.values)
+    plt.xlabel("Date")
+    plt.ylabel("Revenue ($)")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "revenue_by_day.png"), bbox_inches="tight")
+    plt.close()
+
+
 # Demo run 
 
 
