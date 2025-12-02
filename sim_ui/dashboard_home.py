@@ -28,7 +28,7 @@ def dashboard():
     metrics = kpis(df)
 
     # Generate and save charts into static/ so the template can load them
-    generate_dashboard_charts(df, output_dir="static")
+    generate_dashboard_charts(df, out_dir="static")
 
     # Build / update the Folium map in static/
     build_trip_map(df, html_path=os.path.join("static", "dashboard_map.html"))
