@@ -17,8 +17,11 @@ from contextlib import contextmanager
 from typing import Optional, Tuple, Dict
 
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")   
 import matplotlib.pyplot as plt
 import folium
+
 
 import db
 from trip_management import Trip
